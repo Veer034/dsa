@@ -280,152 +280,423 @@ public class MyApp {
   * In Java 17, I actively use Records for DTOs, sealed classes for domain modeling, pattern matching and switch expressions for cleaner logic, text blocks for SQL/JSON, and benefit from GC and JVM encapsulation improvements.
 
 ### Design Patterns
-* [ ] Singleton pattern - different ways to implement, thread-safe singleton
-* [ ] Factory vs Abstract Factory pattern
-* [ ] When to use Builder pattern?
-* [ ] Explain Strategy, Observer, and Decorator patterns
-* [ ] What is Dependency Injection?
+* [x] **Singleton pattern - different ways to implement, thread-safe singleton**
+* [x] **Why Spring Singleton ≠ Gang of Four(GoF) Singleton pattern.**
+  * GoF Singleton guarantees one instance per JVM, while Spring Singleton guarantees one instance per container. Spring deliberately avoids JVM singletons to preserve testability, DI, and lifecycle management.
+* [x] **Factory vs Abstract Factory pattern**
+  * Factory creates a single object, Abstract Factory creates a family of related objects ensuring consistency.
+* [x] **Why Spring uses Factory internally?**
+  * Spring uses Factory because only a Factory can decide what object to create, when to create it, how to wire it, and what to return instead of it (proxy).
+* [x] **When to use Builder pattern?**
+  * Use Builder when object construction is complex, has many optional parameters, or must be immutable and readable.
+* [x] **Explain Strategy, Observer, and Decorator patterns**
+  * Strategy selects behavior, Observer notifies changes, Decorator enhances behavior dynamically.
+* [x] **What is Dependency Injection?**
+  * **Dependency Injection** is a design pattern where an object's dependencies are provided (injected) by an external framework rather than the object creating them itself. This promotes loose coupling, makes code more testable, and allows easy swapping of implementations. In Spring, dependencies are typically injected via constructor, setter, or field injection using @Autowired.
 
-SPRING BOOT
-Core Spring Concepts
-* [ ] Explain IoC (Inversion of Control) and Dependency Injection
-* [ ] Difference between @Component, @Service, @Repository, @Controller
-* [ ] What is ApplicationContext vs BeanFactory?
-* [ ] Explain bean scopes (Singleton, Prototype, Request, Session)
-* [ ] What is the Spring Bean lifecycle?
-* [ ] Difference between @Autowired, @Inject, and @Resource
-  Spring Boot Specifics
-* [ ] What is auto-configuration in Spring Boot?
-* [ ] Explain @SpringBootApplication annotation
-* [ ] How does Spring Boot differ from Spring Framework?
-* [ ] What are Spring Boot Starters?
-* [ ] Explain application.properties vs application.yml
-* [ ] How to create custom auto-configuration?
-  REST APIs
-* [ ] Difference between @RestController and @Controller
-* [ ] What are @PathVariable, @RequestParam, @RequestBody?
-* [ ] How to handle exceptions globally? (@ControllerAdvice, @ExceptionHandler)
-* [ ] Explain HTTP methods and their idempotency
-* [ ] How to version REST APIs?
-* [ ] What is HATEOAS?
-  Spring WebFlux (Reactive)
-* [ ] Difference between blocking vs non-blocking I/O
-* [ ] When to use WebFlux vs Spring MVC?
-* [ ] Explain Mono and Flux
-* [ ] What is backpressure in reactive programming?
-* [ ] How did you handle error handling in reactive streams?
-  Spring Data & ORM
-* [ ] What is JpaRepository vs CrudRepository?
-* [ ] Explain @Transactional and transaction propagation levels
-* [ ] What is N+1 query problem and how to solve it?
-* [ ] Difference between save() and saveAndFlush()
-* [ ] Explain entity lifecycle in JPA
-  Spring Security
-* [ ] How does Spring Security work internally?
-* [ ] Explain authentication vs authorization
-* [ ] What are security filters and filter chain?
-* [ ] How to implement JWT authentication in Spring Boot?
-  Microservices with Spring
+## SPRING BOOT
+
+### Core Spring Concepts
+* [x] **Explain IoC (Inversion of Control) and Dependency Injection**
+  * **IoC (Inversion of Control)** is a principle where the control of object creation and lifecycle management is inverted from the application code to a framework/container. Instead of your code creating objects with new, the framework controls this.
+  * **Dependency Injection** is a specific implementation of IoC. It's how the container actually provides (injects) the dependencies your objects need.
+
+
+* [x] **Difference between @Component, @Service, @Repository, @Controller**
+  * All four create Spring beans; @Component is generic, @Service is for business logic, @Repository is for data access (with exception translation), and @Controller is for handling web requests.
+
+
+* [x] **What is spring AOP?**
+  * Spring AOP is a programming approach where cross-cutting concerns (like logging, transactions, security) are 
+    applied around business methods using proxies, without changing the business code. 
+  * **How Spring AOP works** 
+    * Spring creates a proxy object 
+    * Calls go through proxy 
+    * Advice runs before/after method 
+    * Actual method invoked
+      * **Proxy types:**
+        * JDK Dynamic Proxy → interface-based 
+        * CGLIB Proxy → class-based
+  * **Key limitations (important)**
+    * ❌ Only public methods 
+    * ❌ Only Spring-managed beans 
+    * ❌ Internal method calls not intercepted
+
+
+* [x] **What is ApplicationContext vs BeanFactory?**
+  * BeanFactory is the basic IoC container providing lazy bean initialization, while ApplicationContext is an advanced container that extends BeanFactory with eager initialization, internationalization, event propagation, and AOP support - it's the preferred choice for enterprise applications.
+
+
+* [x] **Explain bean scopes (Singleton, Prototype, Request, Session)**
+  * **Singleton (default)** - One instance per Spring container, shared across the application.
+  * **Prototype** - New instance created every time the bean is requested.
+  * **Request** - One instance per HTTP request (web applications only).
+  * **Session** - One instance per HTTP session (web applications only).
+
+
+* [x] **What is the Spring Bean lifecycle?**
+  * Spring Bean lifecycle: Instantiation → Populate Properties → setBeanName() → setBeanFactory() → setApplicationContext() → @PostConstruct / afterPropertiesSet() → Bean Ready → @PreDestroy / destroy() → Bean Destroyed.
+
+
+* [x] **Difference between @Autowired, @Inject, and @Resource**
+  * **@Autowired** - Spring-specific, injects by type, requires @Qualifier for name-based injection, has required attribute. 
+  * **@Inject** - JSR-330 standard, injects by type, uses @Named for disambiguation, no required attribute. 
+  * **@Resource** - JSR-250 standard, injects by name first (via name attribute) then type, more concise for name-based injection.
+  
+### Spring Boot Specifics
+* [x] **What is auto-configuration in Spring Boot?**
+  * Spring Boot Auto-configuration automatically configures beans based on classpath dependencies, application properties, and existing beans, so you don’t need manual configuration.
+  * For example, if **spring-boot-starter-data-jpa** is on the classpath, Boot auto-configures DataSource, EntityManager, and JpaTransactionManager automatically.
+* [x] **Explain @SpringBootApplication annotation**
+  * @SpringBootApplication enables auto-configuration, component scanning, and Java-based configuration to start a 
+    Spring Boot application with minimal setup.
+* [x] **How does Spring Boot differ from Spring Framework?**
+  * **Spring Framework** is a core framework that provides DI, AOP, MVC, and transaction management, but requires manual configuration.
+* [x] **What are Spring Boot Starters?**
+  * Spring Boot Starters are dependency descriptors that bundle commonly used libraries together. Instead of adding multiple individual dependencies, you add one starter that includes everything needed for a specific functionality.
+* [x] **Explain application.properties vs application.yml**
+  * Both are Spring Boot configuration files, but differ in format. Use `.yml` for complex configurations with deep 
+    nesting, `.properties` for simple configs or when team prefers it. If both exist, `.properties` takes precedence
+
+### REST APIs
+* [x] **Difference between @RestController and @Controller**
+  * @Controller - Used for traditional MVC applications that return views (HTML pages). Requires @ResponseBody on methods to return data directly.
+  *  @RestController - Combination of @Controller + @ResponseBody. Used for REST APIs that return data (JSON/XML), 
+     not views.
+* [x] **What are @PathVariable, @RequestParam, @RequestBody?**
+  * @PathVariable → URL path, 
+  * @RequestParam → query parameters, 
+  * @RequestBody → request payload.
+* [x] **How to handle exceptions globally? (@ControllerAdvice, @ExceptionHandler)**
+  * @ControllerAdvice provides centralized exception handling, and @ExceptionHandler maps exceptions to HTTP responses globally.
+  ```
+  @ControllerAdvice
+  class GlobalExceptionHandler {
+  
+      @ExceptionHandler(ResourceNotFoundException.class)
+      public ResponseEntity<String> handleNotFound(Exception ex) {
+          return ResponseEntity.status(404).body(ex.getMessage());
+      }
+  }
+
+  ```
+
+* [x] **Explain HTTP methods and their idempotency**
+  * **Idempotent** means: making the same request multiple times results in the same server state.
+  * **Key Interview Points** 
+    * Idempotent ≠ Safe (DELETE is idempotent but not safe). 
+    * GET, HEAD are safe and idempotent. 
+    * PUT is idempotent because it replaces state. 
+    * POST is non-idempotent by design (multiple creates).
+    * PATCH is partial update
+  
+### Spring WebFlux (Reactive)
+
+* [x] **Difference between blocking vs non-blocking I/O**
+  * Blocking I/O ties up threads while waiting; non-blocking I/O frees threads and scales better.
+* [x] **When to use WebFlux vs Spring MVC?**
+  * Use MVC for simplicity and WebFlux for massive concurrency with non-blocking I/O.
+* [x] **Explain Mono and Flux**
+  * Mono is for one result, Flux is for many results—both are lazy and non-blocking.
+* [x] **What is backpressure in reactive programming?**
+  * Backpressure prevents fast producers from overwhelming slow consumers by controlling data flow.
+  * Reactive pipelines handle backpressure automatically; use onBackpressureX only when the producer cannot slow down.
+* [x] **How did you handle error handling in reactive streams?**
+  * Reactive error handling is done via operators like onErrorResume and retry, not try–catch.
+  ```
+  1️⃣ onErrorReturn
+  Fallback to a default value.
+  
+  Mono<User> user =
+  userService.findById(id)
+             .onErrorReturn(User.EMPTY);
+
+  2️⃣ onErrorResume (most used)
+
+  Switch to another reactive path.
+  
+  Mono<User> user =
+  userService.findById(id)
+  .onErrorResume(ex -> Mono.empty());
+  
+  3️⃣ onErrorMap
+  
+  Transform exception type.
+  
+  .onErrorMap(e -> new CustomException(e))
+  
+  4️⃣ doOnError
+  
+  Side effects (logging, metrics).
+  
+  .doOnError(log::error)
+  
+  5️⃣ Retry (for transient errors)
+  .retryWhen(Retry.backoff(3, Duration.ofSeconds(2)))
+  ```
+
+### Spring Data & ORM
+
+* [x] **What is JpaRepository vs CrudRepository?**
+  * CrudRepository gives basic CRUD, JpaRepository adds pagination, sorting, and JPA power.
+* [x] **Explain @Transactional and transaction propagation levels**
+  * @Transactional manages DB consistency, and propagation controls how methods join or create transactions.
+  
+| Propagation | Called with transaction | Called without transaction |
+|------------|------------------------|---------------------------|
+| REQUIRED | Uses existing | Creates new |
+| REQUIRES_NEW | Creates new | Creates new |
+| MANDATORY | Uses existing | **FAILS** ✗ |
+| SUPPORTS | Uses existing | Runs without |
+| NOT_SUPPORTED | Suspends, runs without | Runs without |
+| NEVER | **FAILS** ✗ | Runs without |
+| NESTED | Creates savepoint | **FAILS** ✗ |
+  
+* [x] **What is N+1 query problem and how to solve it?**
+  * N+1 is a performance issue caused by lazy loading; solve it using fetch join, entity graphs, or DTO projections.
+  * Ways to solve the issue.
+    * Fetch Join (Preferred)
+      * Load parent and child in single query 
+      * JOIN FETCH in JPQL 
+      *  ```
+         @Query("SELECT o FROM Order o JOIN FETCH o.items")
+         List<Order> findAllWithItems();
+         ```
+    * EntityGraph 
+      * Declarative fetch plan 
+      * Avoids query changes 
+      * ```
+        @EntityGraph(attributePaths = "items")
+        List<Order> findAll();
+         ```
+    * DTO / Projection Query 
+      * Fetch only required fields 
+      * Best for read-only APIs 
+      * ```
+        SELECT new OrderDTO(o.id, i.name)
+        FROM Order o JOIN o.items i
+        ```
+    * Batch Fetching 
+      * Configure Hibernate batch size 
+      * Reduces N queries to N/batch 
+      * ```
+        hibernate.default_batch_fetch_size=20
+        ```
+
+
+
+* [x] **Difference between save() and saveAndFlush()**
+  * **save()** - Persists entity to the persistence context (Hibernate cache) but doesn't immediately write to the database. The actual INSERT/UPDATE happens when the transaction commits or flush() is called. 
+  * **saveAndFlush()** - Persists entity AND immediately executes the SQL statement to the database, bypassing the normal flush timing.
+
+###  Spring Security
+* [x] **How does Spring Security work internally?**
+  * **HTTP Request** 
+    * SecurityFilterChain (15+ filters)
+    * UsernamePasswordAuthenticationFilter : Intercepts login requests, extracts credentials
+      * ```
+        // Captures username/password from request
+        UsernamePasswordAuthenticationToken token = new UsernamePasswordAuthenticationToken(username, password);
+        ```
+    * AuthenticationManager : Delegates authentication to providers
+      * ```
+        Authentication auth = authenticationManager.authenticate(token);
+        ```
+    * AuthenticationProvider : Does actual authentication logic
+      * ```
+        @Override
+        public Authentication authenticate(Authentication auth) {
+        String username = auth.getName();
+        String password = auth.getCredentials().toString();
+  
+        UserDetails user = userDetailsService.loadUserByUsername(username);
+      
+        if (passwordEncoder.matches(password, user.getPassword())) {
+            return new UsernamePasswordAuthenticationToken(
+                user, password, user.getAuthorities()
+            );
+          }
+         throw new BadCredentialsException("Invalid credentials");
+        }
+        ```
+    * UserDetailsService : Loads user from database
+      * ```
+        @Override
+        public UserDetails loadUserByUsername(String username) {
+        User user = userRepository.findByUsername(username);
+        return new org.springframework.security.core.userdetails.User(
+        user.getUsername(),
+        user.getPassword(),
+        user.getAuthorities()
+        );
+        }
+        ```
+    * Your Controller
+    * Spring Security = Filter Chain → Authentication → Authorization 
+      * Filters intercept requests before controllers 
+      * Authentication verifies identity (username/password)
+      * Authorization checks permissions (roles/authorities)
+      * SecurityContext stores authenticated user throughout request 
+      * Customizable via SecurityFilterChain configuration
+* [x] **Why Custom Privileges/Scopes Instead of Spring's hasRole()?**
+  * Spring's hasRole() is limited to simple role-based access (ADMIN, USER). Our application needs fine-grained 
+    permissions at feature level (like 'marketing:read', 'marketing:write') and subscription-based access (Basic, 
+    Pro, Enterprise). Custom implementation gives us flexibility to combine multiple conditions and support complex 
+    business rules that Spring's built-in annotations can't handle.
+* [x] **How to implement JWT authentication in Spring Boot?**
+  * For JWT Token Validation (extract, validate, set context):
+    * MVC: Extend OncePerRequestFilter 
+    * WebFlux: Implement WebFilter
+    ```
+    @Component
+    public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, 
+                                   HttpServletResponse response, 
+                                   FilterChain filterChain) 
+            throws ServletException, IOException {
+        // Extract JWT, validate, set SecurityContext
+        filterChain.doFilter(request, response);
+      }
+    }
+    ```
+
+  * For Authorization Logic (check privileges, roles, scopes):
+    * MVC: Implement AuthorizationManager<RequestAuthorizationContext>
+    * WebFlux: Implement ReactiveAuthorizationManager<AuthorizationContext>
+    ```
+    @Component
+    public class CustomAuthorizationManager implements AuthorizationManager<RequestAuthorizationContext> {
+  
+    @Override
+    public AuthorizationDecision check(Supplier<Authentication> authentication, 
+                                      RequestAuthorizationContext context) {
+        // Your authorization logic
+        return new AuthorizationDecision(true/false);
+     }
+    }
+    ```
+
+  
+### Microservices with Spring
+
 * [ ] How to implement service discovery? (Eureka, Consul)
 * [ ] What is API Gateway pattern?
 * [ ] Explain Circuit Breaker pattern (Resilience4j, Hystrix)
 * [ ] How to handle distributed tracing? (Sleuth, Zipkin)
 * [ ] What is distributed configuration? (Spring Cloud Config)
 
-MYSQL
-SQL Fundamentals
+## MYSQL
+
+### SQL Fundamentals
+
 * [ ] Difference between INNER JOIN, LEFT JOIN, RIGHT JOIN, FULL OUTER JOIN
 * [ ] What is self-join? Give an example
 * [ ] Explain GROUP BY and HAVING clause
 * [ ] Difference between WHERE and HAVING
 * [ ] What are aggregate functions?
-  Indexing & Performance
+
+###  Indexing & Performance
 * [ ] What is an index? Types of indexes (B-Tree, Hash, Full-Text)
 * [ ] When should you create an index?
 * [ ] What is covering index?
 * [ ] Explain the difference between clustered and non-clustered index
 * [ ] How does EXPLAIN plan work?
 * [ ] What are slow query logs and how to analyze them?
-  Transactions & Isolation
+
+### Transactions & Isolation
 * [ ] Explain ACID properties
 * [ ] What are transaction isolation levels? (Read Uncommitted, Read Committed, Repeatable Read, Serializable)
 * [ ] What are dirty read, non-repeatable read, and phantom read?
 * [ ] Difference between COMMIT and ROLLBACK
 * [ ] What is deadlock in database and how to prevent it?
-  Database Design
+
+### Database Design
 * [ ] What is normalization? Explain 1NF, 2NF, 3NF, BCNF
 * [ ] When to denormalize?
 * [ ] What is ER diagram?
 * [ ] Primary key vs Foreign key vs Unique key
 * [ ] What is composite key?
-  Advanced Concepts
+
+### Advanced Concepts
 * [ ] What are stored procedures and functions?
 * [ ] Difference between stored procedure and function
 * [ ] What are triggers? When to use them?
 * [ ] Explain views - materialized vs regular views
 * [ ] What is partitioning? Types of partitioning
 * [ ] How to handle schema migrations in production?
-  Replication & Scaling
+
+### Replication & Scaling
 * [ ] Explain master-slave replication
 * [ ] What is read replica?
 * [ ] How to scale MySQL databases?
 * [ ] Difference between vertical and horizontal scaling
 
-KAFKA
-Core Concepts
+## KAFKA
+
+### Core Concepts
 * [ ] What is Kafka and why is it used?
 * [ ] Explain Kafka architecture (Broker, Topic, Partition, Producer, Consumer)
 * [ ] What is a Kafka topic and partition?
 * [ ] What is replication factor and how does it work?
 * [ ] Explain the role of ZooKeeper in Kafka (and KRaft mode in new versions)
-  Producers
+
+### Producers
 * [ ] How does a producer publish messages to Kafka?
 * [ ] What are producer acknowledgments (acks=0, 1, all)?
 * [ ] Explain idempotent producer
 * [ ] What is producer batching and compression?
 * [ ] How to ensure message ordering in Kafka?
-  Consumers
+
+### Consumers
 * [ ] What is a consumer group?
 * [ ] How does partition assignment work in consumer groups?
 * [ ] Explain offset management - auto-commit vs manual commit
 * [ ] What is consumer lag and how to monitor it?
 * [ ] What happens when a consumer fails?
 * [ ] Difference between poll() and subscribe()
-  Performance & Reliability
+
+### Performance & Reliability
 * [ ] How to achieve exactly-once semantics in Kafka?
 * [ ] What is log compaction?
 * [ ] How to handle message retries?
 * [ ] Explain back pressure handling in Kafka
 * [ ] How did you tune Kafka for high throughput in your projects?
-  Operations & Monitoring
+
+### Operations & Monitoring
 * [ ] How to monitor Kafka cluster health?
 * [ ] What metrics do you track? (Throughput, latency, consumer lag)
 * [ ] How to handle rebalancing in consumer groups?
 * [ ] How to add/remove brokers from a cluster?
 * [ ] What is ISR (In-Sync Replicas)?
-  Integration
+
+### Integration
 * [ ] How did you integrate Kafka with Spring Boot?
 * [ ] What is Kafka Streams vs Kafka Connect?
 * [ ] How to implement dead letter queue in Kafka?
 
-REDIS
-Core Concepts
+## REDIS
+### Core Concepts
 * [ ] What is Redis and why is it used?
 * [ ] Explain Redis data structures (String, List, Set, Sorted Set, Hash, Bitmap, HyperLogLog, Streams)
 * [ ] What is the difference between Redis and Memcached?
 * [ ] Is Redis single-threaded or multi-threaded?
-  Data Structures & Commands
+
+### Data Structures & Commands
 * [ ] When to use List vs Set vs Sorted Set?
 * [ ] How to implement a queue using Redis?
 * [ ] How to implement rate limiting using Redis?
 * [ ] Explain INCR, INCRBY, and their atomic nature
 * [ ] What are Pub/Sub in Redis?
-  Persistence
+
+### Persistence
 * [ ] What are RDB and AOF persistence?
 * [ ] Difference between RDB and AOF
 * [ ] Which persistence mechanism did you use and why?
 * [ ] What happens during Redis restart?
-  Cluster & High Availability
+
+### Cluster & High Availability
 * [ ] Explain Redis Cluster architecture
 * [ ] What is Redis Sentinel?
 * [ ] Difference between Redis Cluster and Redis Sentinel
@@ -433,258 +704,260 @@ Core Concepts
 * [ ] How did you set up Redis cluster at Convonest?
 * [ ] What is hash slot in Redis Cluster?
 * [ ] How does failover work in Redis?
-  Caching Strategies
+
+### Caching Strategies
 * [ ] Explain cache-aside, write-through, write-behind patterns
 * [ ] What is cache invalidation strategy?
 * [ ] How to handle cache stampede problem?
 * [ ] What is cache warming?
 * [ ] Explain TTL and expiration policies
-  Performance & Best Practices
+
+### Performance & Best Practices
 * [ ] How to handle memory limits in Redis?
 * [ ] What are eviction policies in Redis?
 * [ ] How to monitor Redis performance?
 * [ ] What is pipelining in Redis?
 * [ ] How to handle large keys in Redis?
 
-Elasticsearch
-Architecture & Core Concepts
+## Elasticsearch
+### Architecture & Core Concepts
 * [ ] Explain the internal architecture of Elasticsearch. How do primary and replica shards work together?
 * [ ] What is the difference between inverted index and forward index? How does Elasticsearch leverage inverted indices?
 * [ ] Describe the lifecycle of a document from indexing to search in Elasticsearch.
 * [ ] How does Elasticsearch achieve near real-time search? Explain the role of refresh interval, translog, and flush operations.
 * [ ] What are segments in Lucene? How does segment merging work and why is it important?
-  Cluster Management & Scalability
+### Cluster Management & Scalability
 * [ ] How would you design an Elasticsearch cluster for high availability and fault tolerance?
 * [ ] Explain the master election process. What happens during a split-brain scenario and how do you prevent it?
 * [ ] How do you handle cluster scaling (both vertical and horizontal)? What are the considerations?
 * [ ] Describe shard allocation strategies. When would you use awareness attributes?
 * [ ] How do you perform zero-downtime reindexing for a large index?
-  Performance Optimization
+### Performance Optimization
 * [ ] What strategies would you use to optimize search performance for a 500TB cluster?
 * [ ] Explain query vs filter context. How does caching work in each?
 * [ ] How would you troubleshoot slow queries? Walk through your debugging approach.
 * [ ] What is the impact of having too many shards? How do you determine the optimal shard size?
 * [ ] Describe techniques to optimize indexing throughput for high-volume data ingestion.
-  Query DSL & Search
+### Query DSL & Search
 * [ ] Explain the difference between match, match_phrase, and term queries. When would you use each?
 * [ ] How do bool queries work? Explain must, should, filter, and must_not clauses with scoring implications.
 * [ ] What are function_score and script_score queries? Provide use cases.
 * [ ] How would you implement fuzzy search and autocomplete functionality at scale?
-  Data Modeling & Index Management
+### Data Modeling & Index Management
 * [ ] How do you design index mapping for a multi-tenant SaaS application?
 * [ ] Explain index templates, dynamic templates, and when to use each.
 * [ ] What are the pros and cons of nested vs parent-child relationships?
 * [ ] How would you implement time-series data storage? Discuss rollover, ILM policies, and data tiers.
 * [ ] When would you use alias vs reindex? Explain with scenarios.
-  Monitoring & Production Issues
+### Monitoring & Production Issues
 * [ ] What metrics do you monitor in production? How do you set up alerts?
 * [ ] How would you troubleshoot circuit breaker exceptions and memory pressure?
 * [ ] Explain the impact of heap size on Elasticsearch performance. How do you tune JVM settings?
 * [ ] Describe your approach to handling unassigned shards in production.
 * [ ] How do you perform disaster recovery? What's your backup and restore strategy?
-  Advanced Topics
+### Advanced Topics
 * [ ] Explain cross-cluster search and cross-cluster replication. What are the use cases?
 * [ ] How does Elasticsearch handle distributed consistency? Discuss write and read consistency models.
 * [ ] What is adaptive replica selection? How does it improve search performance?
 * [ ] Describe your experience with machine learning features in Elasticsearch (anomaly detection, inference).
 * [ ] How would you implement custom analyzers and tokenizers for specialized text processing?
-  Security & Compliance
+### Security & Compliance
 * [ ] How do you implement role-based access control (RBAC) in Elasticsearch?
 * [ ] Explain field-level and document-level security. Provide implementation examples.
 * [ ] How do you secure data at rest and in transit?
 * [ ] What are your strategies for audit logging and compliance requirements (GDPR, SOC2)?
-  Integration & Ecosystem
+### Integration & Ecosystem
 * [ ] Describe your experience integrating Elasticsearch with Kafka/streaming platforms.
 * [ ] How do you design a logging/monitoring pipeline using the ELK/Elastic stack?
 * [ ] What are the differences between Elasticsearch, Solr, and newer alternatives like OpenSearch?
 * [ ] How would you migrate from a relational database to Elasticsearch?
-  Scenario-Based Questions
+### Scenario-Based Questions
 * [ ] Your cluster is showing RED status in production. Walk me through your troubleshooting steps.
 * [ ] You need to redesign an index with 2 billion documents. What's your approach with minimal downtime?
 * [ ] A query that previously took 100ms now takes 5 seconds. How do you diagnose and fix this?
 * [ ] Design an Elasticsearch architecture for a global e-commerce search system handling 100K QPS.
 
 
-DOCKER
-Core Concepts
+## DOCKER
+### Core Concepts
 * [ ] What is Docker and containerization?
 * [ ] Difference between virtualization and containerization
 * [ ] Explain Docker architecture (Docker Engine, Docker Daemon, Docker CLI)
 * [ ] What is a Docker image vs Docker container?
 * [ ] What is Docker Hub and Docker Registry?
-  Dockerfile & Images
+### Dockerfile & Images
 * [ ] Explain Dockerfile instructions (FROM, RUN, CMD, ENTRYPOINT, COPY, ADD, ENV, EXPOSE, WORKDIR)
 * [ ] Difference between CMD and ENTRYPOINT
 * [ ] Difference between COPY and ADD
 * [ ] What is multi-stage build and why use it?
 * [ ] How to optimize Docker image size?
 * [ ] What are layers in Docker images?
-  Container Management
+### Container Management
 * [ ] How to run, stop, and remove containers?
 * [ ] What are Docker volumes and why use them?
 * [ ] Difference between bind mount and volume
 * [ ] What is Docker network? Types of networks
 * [ ] How to link multiple containers?
 * [ ] What is docker-compose and when to use it?
-  Best Practices
+### Best Practices
 * [ ] How to handle secrets in Docker?
 * [ ] How to minimize Docker image size?
 * [ ] What is .dockerignore file?
 * [ ] How to debug issues in Docker containers?
 * [ ] How did you implement Docker in your CI/CD pipeline?
 
-KUBERNETES
-Core Concepts
+## KUBERNETES
+### Core Concepts
 * [ ] What is Kubernetes and why is it used?
 * [ ] Explain Kubernetes architecture (Master node, Worker node, Control Plane)
 * [ ] What are Pods, Nodes, and Clusters?
 * [ ] What is the smallest deployable unit in Kubernetes?
 * [ ] Explain the role of etcd, kube-apiserver, kube-scheduler, kube-controller-manager, kubelet, kube-proxy
-  Workload Resources
+### Workload Resources
 * [ ] What is a Pod? Can a Pod contain multiple containers?
 * [ ] Difference between Deployment, StatefulSet, DaemonSet, Job, CronJob
 * [ ] When to use Deployment vs StatefulSet?
 * [ ] How does rolling update work in Kubernetes?
 * [ ] What is ReplicaSet and how it differs from Deployment?
-  Networking
+### Networking
 * [ ] How does networking work in Kubernetes?
 * [ ] What is a Service? Types of Services (ClusterIP, NodePort, LoadBalancer, ExternalName)
 * [ ] What is Ingress and Ingress Controller?
 * [ ] Explain how DNS works in Kubernetes
-  Storage
+### Storage
 * [ ] What are Volumes in Kubernetes?
 * [ ] Difference between PersistentVolume (PV) and PersistentVolumeClaim (PVC)
 * [ ] What are StorageClasses?
 * [ ] How did you handle stateful applications in Kubernetes?
-  Configuration & Secrets
+### Configuration & Secrets
 * [ ] What are ConfigMaps and Secrets?
 * [ ] How to inject environment variables in Pods?
 * [ ] Best practices for managing secrets in Kubernetes
-  Scaling & Autoscaling
+### Scaling & Autoscaling
 * [ ] What is Horizontal Pod Autoscaler (HPA)?
 * [ ] What is Vertical Pod Autoscaler (VPA)?
 * [ ] What is Cluster Autoscaler?
 * [ ] How to manually scale deployments?
-  Health & Monitoring
+### Health & Monitoring
 * [ ] Difference between Liveness probe, Readiness probe, and Startup probe
 * [ ] How to monitor Kubernetes cluster?
 * [ ] What is kubectl and common commands you use?
-  Operations
+### Operations
 * [ ] How to debug a failing Pod?
 * [ ] What are labels and selectors?
 * [ ] What are namespaces and their use?
 * [ ] How to perform zero-downtime deployment?
 * [ ] How did you set up Kubernetes on AKS at Convonest?
 
-HELM
-Core Concepts
+## HELM
+### Core Concepts
 * [ ] What is Helm and why is it called "package manager for Kubernetes"?
 * [ ] What are Helm Charts?
 * [ ] Explain Helm architecture (Helm CLI, Tiller in Helm 2 vs Helm 3)
 * [ ] What is the difference between Helm 2 and Helm 3?
-  Chart Structure
+### Chart Structure
 * [ ] Explain the structure of a Helm Chart (Chart.yaml, values.yaml, templates/)
 * [ ] What is values.yaml and how to use it?
 * [ ] What are Helm templates and how do they work?
 * [ ] How to override default values in Helm?
-  Commands & Operations
+### Commands & Operations
 * [ ] Common Helm commands (install, upgrade, rollback, uninstall, list)
 * [ ] How to debug Helm charts? (helm template, helm lint, --dry-run)
 * [ ] What is Helm release?
 * [ ] How to manage multiple environments with Helm?
-  Best Practices
+### Best Practices
 * [ ] How did you create custom Helm charts at Convonest and Cisco?
 * [ ] How to version Helm charts?
 * [ ] How to manage dependencies in Helm?
 * [ ] What is Helm repository?
 
-OAUTH2 & KEYCLOAK
-OAuth2 Core Concepts
+## OAUTH2 & KEYCLOAK
+### OAuth2 Core Concepts
 * [ ] What is OAuth2?
 * [ ] Difference between authentication and authorization
 * [ ] What are OAuth2 grant types you've used? (Authorization Code, Client Credentials, Refresh Token)
 * [ ] When to use which grant type?
-  Tokens
+### Tokens
 * [ ] What is Access Token vs Refresh Token?
 * [ ] What is JWT structure? (Header, Payload, Signature)
 * [ ] How to validate JWT?
 * [ ] What is token introspection?
-  OAuth2 Implementation
+### OAuth2 Implementation
 * [ ] How did you implement OAuth2 at Convonest with Google and Outlook?
 * [ ] How to store tokens securely?
 * [ ] You mentioned AES-256 encryption and SHA-256 hashing - explain your approach
 * [ ] Where did you store tokens? (Azure Key Vault)
-  Keycloak Basics
+### Keycloak Basics
 * [ ] What is Keycloak and why did you use it?
 * [ ] What is a Realm in Keycloak?
 * [ ] How did you register microservices as clients in Keycloak?
 * [ ] What are client types in Keycloak? (confidential, public, bearer-only)
 * [ ] Difference between realm roles and client roles?
-  Service Account Tokens
+### Service Account Tokens
 * [ ] What are service account tokens?
 * [ ] How did microservices authenticate with each other using service account tokens?
 * [ ] Explain the flow: Service A needs to call Service B - what happens?
 * [ ] How to generate service account token programmatically?
 * [ ] What is Client Credentials grant flow?
-  JWT Token Handling
+### JWT Token Handling
 * [ ] What information is present in Keycloak JWT token? (roles, scopes, exp, sub)
 * [ ] Why did you implement custom JWT decoder instead of using Spring Security's default?
 * [ ] How did you validate JWT signature?
 * [ ] How to extract roles and scopes from JWT?
 * [ ] Where did you place JWT validation logic? (Filter, Interceptor, Controller level)
-  Controller-Level Authorization
+### Controller-Level Authorization
 * [ ] How did you implement role and scope checking at controller level?
 * [ ] Did you use custom annotations? Show example
 * [ ] How to extract user roles from JWT in controller?
 * [ ] How did you handle unauthorized access (403)?
-  Integration with Spring Boot
+###  Integration with Spring Boot
 * [ ] What dependencies did you use for Keycloak integration?
 * [ ] How did you configure Keycloak in application.yml?
 * [ ] How to get service account token in Spring Boot?
 * [ ] How did you add token to outgoing HTTP requests (RestTemplate/WebClient)?
-  Token Management
+###   Token Management
 * [ ] How did you handle token expiration?
 * [ ] How long was token validity in your setup?
 * [ ] How to refresh expired tokens?
-  Microservices Communication
+###  Microservices Communication
 * [ ] When Service A calls Service B, did you propagate user token or use service account token?
 * [ ] Why did you choose that approach?
 * [ ] How to add Authorization header in inter-service calls?
 * [ ] How did you handle token caching?
-  Security Best Practices
+###   Security Best Practices
 * [ ] Where did you store client secrets?
 * [ ] How did you secure Keycloak admin console?
 * [ ] Should token validation happen at API Gateway or service level? What did you choose?
-  Troubleshooting
+###  Troubleshooting
 * [ ] How to debug "401 Unauthorized" between microservices?
 * [ ] What to check when JWT validation fails?
 * [ ] How to verify if client is properly configured in Keycloak?
 * [ ] How to check token validity in Keycloak admin console?
 
-WEBSOCKET
-Core Concepts
+## WEBSOCKET
+###  Core Concepts
 * [ ] What is WebSocket and how does it differ from HTTP?
 * [ ] When to use WebSocket vs REST API?
 * [ ] Explain WebSocket handshake process
 * [ ] What is full-duplex communication?
-  Implementation
+###    Implementation
 * [ ] How did you implement WebSocket for live chat at Convonest?
 * [ ] What is STOMP protocol?
 * [ ] How to handle connection failures and reconnection?
 * [ ] How to broadcast messages to multiple clients?
-  Scaling & Performance
+###    Scaling & Performance
 * [ ] How to scale WebSocket connections horizontally?
 * [ ] How to handle WebSocket with load balancers?
 * [ ] How to implement authentication in WebSocket?
 * [ ] How did you integrate WebSocket with Spring Boot?
 
-AI/ML SPECIFIC QUESTIONS
-DeBERTa Model
+## AI/ML SPECIFIC QUESTIONS
+###  DeBERTa Model
 * [ ] Why did you choose DeBERTa over BERT or RoBERTa for email classification?
 * [ ] What is the difference between BERT and DeBERTa?
 * [ ] Explain disentangled attention mechanism in DeBERTa
 * [ ] What are the advantages of DeBERTa?
-  Email Classification
+###  Email Classification
 * [ ] What approach did you use to train the email classification model?
 * [ ] How did you prepare training data for email classification?
 * [ ] What evaluation metrics did you use? (Accuracy, Precision, Recall, F1-Score)
@@ -692,120 +965,120 @@ DeBERTa Model
 * [ ] Did you use transfer learning or fine-tuning?
 * [ ] What was your dataset size and how did you split it?
 * [ ] How did you handle multilingual emails?
-  RAG (Retrieval-Augmented Generation)
+###  RAG (Retrieval-Augmented Generation)
 * [ ] What is RAG and why did you use it for automated email responses?
 * [ ] How did you implement RAG architecture?
 * [ ] What vector database or search engine did you use for retrieval?
 * [ ] How did you create embeddings?
 * [ ] How to handle context window limitations?
 * [ ] What LLM did you use with RAG? (Mistral, Azure OpenAI, Ollama)
-  NLP & Model Training
+###  NLP & Model Training
 * [ ] What NLP preprocessing steps did you apply?
 * [ ] How did you handle tokenization?
 * [ ] What is the difference between training from scratch vs fine-tuning?
 * [ ] How did you evaluate model performance in production?
 * [ ] How to handle model drift?
 * [ ] What frameworks did you use? (Hugging Face, TensorFlow, PyTorch)
-  ML Operations
+###  ML Operations
 * [ ] How did you deploy ML models in production?
 * [ ] How did you version ML models?
 * [ ] How to monitor ML model performance?
 * [ ] How did you handle model retraining?
 * [ ] What is A/B testing for ML models?
 
-CLUSTER SETUP & DEVOPS
-Redis Cluster Setup
+## CLUSTER SETUP & DEVOPS
+###  Redis Cluster Setup
 * [ ] Walk through your Redis cluster setup on Azure VMs
 * [ ] How many master and replica nodes did you configure?
 * [ ] How did you configure Redis cluster using Helm charts?
 * [ ] What monitoring did you set up for Redis?
 * [ ] How to handle Redis cluster failover?
 * [ ] What backup strategy did you implement?
-  Kafka Cluster Setup
+###  Kafka Cluster Setup
 * [ ] Explain your Kafka cluster architecture
 * [ ] How many brokers and what replication factor?
 * [ ] How did you deploy Kafka on Kubernetes?
 * [ ] What monitoring tools did you use for Kafka? (Confluent Control Center, Kafka Manager)
 * [ ] How did you handle Kafka upgrades?
-  Elasticsearch Cluster Setup
+###   Elasticsearch Cluster Setup
 * [ ] Describe your Elasticsearch cluster setup at Convonest
 * [ ] How many master, data, and client nodes?
 * [ ] What index management strategy did you implement?
 * [ ] How did you configure index sharding and replicas?
 * [ ] What monitoring stack did you use? (Kibana, Filebeat, Grafana)
 * [ ] How did you handle Elasticsearch snapshot and restore?
-  Azure Infrastructure
+###  Azure Infrastructure
 * [ ] How did you design the Azure infrastructure at Convonest?
 * [ ] What services did you use? (AKS, VMs, Key Vault, SQL, Monitor)
 * [ ] How did you manage infrastructure as code?
 * [ ] What networking setup did you implement?
 * [ ] How did you handle security and access control?
 
-CI/CD & DEPLOYMENT
-Docker Image Deployment from GitHub
+## CI/CD & DEPLOYMENT
+###  Docker Image Deployment from GitHub
 * [ ] How did you automate Docker image builds from GitHub repo?
 * [ ] What CI/CD tool did you use? (Jenkins, GitHub Actions, Azure DevOps)
 * [ ] Explain your complete CI/CD pipeline
 * [ ] How to push Docker images to container registry? (Docker Hub, Azure ACR, AWS ECR)
 * [ ] How did you implement blue-green deployment at Convonest?
 * [ ] What is the difference between blue-green and canary deployment?
-  Kubernetes Deployment
+###  Kubernetes Deployment
 * [ ] How to deploy Docker images to Kubernetes?
 * [ ] How did you manage Kubernetes manifests?
 * [ ] What is GitOps approach?
 * [ ] How to implement zero-downtime deployment?
 * [ ] How did you handle rollback in case of failures?
-  Automation & Scripting
+###  Automation & Scripting
 * [ ] You mentioned automated deployment scripts - what did they include?
 * [ ] How did you use Bash scripting for automation?
 * [ ] How to automate Helm chart deployments?
 
-SYSTEM DESIGN & ARCHITECTURE
-Architecture Design
+## SYSTEM DESIGN & ARCHITECTURE
+###  Architecture Design
 * [ ] Design a scalable architecture for Convonest customer engagement platform
 * [ ] How would you design a real-time ad decisioning engine (from Zee5 experience)?
 * [ ] Design a ticket management system with SLA tracking
 * [ ] How to design a system for millions of concurrent WebSocket connections?
-  Scalability
+###  Scalability
 * [ ] How did you ensure horizontal scalability in your systems?
 * [ ] What strategies did you use for database scaling?
 * [ ] How to handle peak traffic loads?
 * [ ] What is the difference between stateful and stateless applications?
-  Reliability & Monitoring
+###  Reliability & Monitoring
 * [ ] What monitoring stack did you implement? (Prometheus, Grafana, Kibana, Azure Monitor)
 * [ ] How to implement distributed tracing?
 * [ ] What SLAs did you define and how to monitor them?
 * [ ] How to implement circuit breaker pattern?
 * [ ] What alerting mechanisms did you set up?
-  Security
+###    Security
 * [ ] How did you secure microservices communication?
 * [ ] What encryption strategies did you implement? (AES-256, SHA-256 at Convonest)
 * [ ] How to manage secrets in production? (Azure Key Vault)
 * [ ] What authentication/authorization mechanisms did you implement?
 
-BEHAVIORAL & LEADERSHIP (For Tech Lead/Architect Role)
-Technical Leadership
+## BEHAVIORAL & LEADERSHIP (For Tech Lead/Architect Role)
+###  Technical Leadership
 * [ ] You co-founded Convonest - how did you make technology decisions?
 * [ ] How do you evaluate build vs buy decisions?
 * [ ] Describe a time when you had to refactor a legacy system
 * [ ] How do you mentor junior developers?
 * [ ] How do you handle technical debt?
-  Project Management
+###    Project Management
 * [ ] How do you estimate engineering resources for a project?
 * [ ] Describe your SDLC experience
 * [ ] How do you prioritize features vs technical improvements?
 * [ ] How do you handle conflicts in technical decisions within the team?
-  Architecture Decisions
+###    Architecture Decisions
 * [ ] Why did you choose microservices over monolith at Convonest?
 * [ ] How do you evaluate technology stack for a new project?
 * [ ] Describe a complex technical challenge you faced and how you solved it
 * [ ] You worked as Technical Advisor - what due diligence process did you follow?
-  Cross-Functional Experience
+###    Cross-Functional Experience
 * [ ] You've worked across AdTech, Creative platforms, SaaS - how do you adapt to different domains?
 * [ ] How did you handle the transition from Backend Engineer to Co-Founder?
 * [ ] Describe your experience with on-site international code reviews (China)
 
-SCENARIO-BASED QUESTIONS
+## SCENARIO-BASED QUESTIONS
 * [ ] Scenario 1: Your Kafka cluster is experiencing high consumer lag. How would you debug and resolve it?
 * [ ] Scenario 2: A microservice is experiencing intermittent 500 errors. How would you troubleshoot using your monitoring stack?
 * [ ] Scenario 3: Your Redis cluster is running out of memory. What steps would you take?
