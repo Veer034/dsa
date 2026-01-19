@@ -79,8 +79,9 @@
 41. [x] **Serialize and Deserialize Binary Tree** ⭐⭐⭐ https://leetcode.com/problems/serialize-and-deserialize-binary-tree/
 42. [x] Kth Smallest Element in BST https://leetcode.com/problems/kth-smallest-element-in-a-bst/
 43. [x] **HARD** Binary Tree Maximum Path Sum https://leetcode.com/problems/binary-tree-maximum-path-sum/
-44. [ ] Construct Binary Tree from Preorder and Inorder
-45. [x] Count Good Nodes in Binary Tree https://leetcode.com/problems/count-good-nodes-in-binary-tree/
+44. [ ] https://leetcode.com/problems/path-sum-iii/
+45. [ ] Construct Binary Tree from Preorder and Inorder
+46. [x] Count Good Nodes in Binary Tree https://leetcode.com/problems/count-good-nodes-in-binary-tree/
 
 **Daily:** 3-4 problems | **Time:** 2 hours
 
