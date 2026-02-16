@@ -30,8 +30,7 @@
 10. [x] Rotate Image https://leetcode.com/problems/rotate-image/description/
 11. [x] Group Anagrams https://leetcode.com/problems/group-anagrams/
 12. [x] Top K Frequent Elements https://leetcode.com/problems/top-k-frequent-elements/
-13. [x] HARD Longest Substring Without Repeating Characters https://leetcode.
-    com/problems/longest-substring-without-repeating-characters/
+13. [x] HARD Longest Substring Without Repeating Characters https://leetcode.com/problems/longest-substring-without-repeating-characters/
 14. [x] HARD Minimum Window Substring https://leetcode.com/problems/minimum-window-substring/
 15. [ ] HARD Longest Repeating Character Replacement
 16. [ ] Sliding Window Maximum
@@ -79,7 +78,7 @@
 41. [x] **Serialize and Deserialize Binary Tree** ⭐⭐⭐ https://leetcode.com/problems/serialize-and-deserialize-binary-tree/
 42. [x] Kth Smallest Element in BST https://leetcode.com/problems/kth-smallest-element-in-a-bst/
 43. [x] **HARD** Binary Tree Maximum Path Sum https://leetcode.com/problems/binary-tree-maximum-path-sum/
-44. [ ] https://leetcode.com/problems/path-sum-iii/
+44. [x] Path Sum III https://leetcode.com/problems/path-sum-iii/
 45. [ ] Construct Binary Tree from Preorder and Inorder
 46. [x] Count Good Nodes in Binary Tree https://leetcode.com/problems/count-good-nodes-in-binary-tree/
 
@@ -93,34 +92,35 @@
 
 ### 1D DP (10 problems)
 
-46. [ ] Climbing Stairs
-47. [ ] House Robber
-48. [ ] House Robber II
-49. [ ] **Coin Change** ⭐⭐⭐
-50. [ ] **Maximum Product Subarray** ⭐⭐
-51. [ ] Word Break
+46. [x] Climbing Stairs https://leetcode.com/problems/climbing-stairs/
+47. [x] House Robber https://leetcode.com/problems/house-robber/
+48. [x] House Robber II https://leetcode.com/problems/house-robber-ii/
+49. [x] **Coin Change** ⭐⭐⭐ https://leetcode.com/problems/coin-change/
+50. [x] **Maximum Product Subarray** ⭐⭐ https://leetcode.com/problems/maximum-product-subarray
+51. [x] Word Break https://leetcode.com/problems/word-break/
 52. [ ] Decode Ways
-53. [ ] Longest Increasing Subsequence
+53. [x] Longest Increasing Subsequence https://leetcode.com/problems/longest-increasing-subsequence/
 54. [ ] Partition Equal Subset Sum
 55. [ ] Target Sum
 
 ### 2D DP (15 problems)
 
 56. [ ] Unique Paths
-57. [ ] Minimum Path Sum
-58. [ ] **Longest Common Subsequence** ⭐⭐⭐
-59. [ ] **Edit Distance** ⭐⭐⭐
+57. [x] Minimum Path Sum https://leetcode.com/problems/minimum-path-sum/
+58. [x] **Longest Common Subsequence** ⭐⭐⭐ https://leetcode.com/problems/longest-common-subsequence/description/
+59. [ ] **Edit Distance** ⭐⭐⭐ 
 60. [ ] Regular Expression Matching
-61. [ ] Longest Palindromic Substring
-62. [ ] Palindromic Substrings
-63. [ ] Maximal Square
-64. [ ] Best Time to Buy and Sell Stock with Cooldown
-65. [ ] Best Time to Buy and Sell Stock IV
-66. [ ] Burst Balloons
-67. [ ] Interleaving String
-68. [ ] Distinct Subsequences
-69. [ ] Russian Doll Envelopes
-70. [ ] Triangle
+61. [x] Longest Palindromic Substring https://leetcode.com/problems/longest-palindromic-substring/
+62. [x] Palindromic Substrings https://leetcode.com/problems/palindromic-substrings/
+63. [x] Maximal Square https://leetcode.com/problems/maximal-square/
+64. [x] Best Time to Buy and Sell Stock https://leetcode.com/problems/best-time-to-buy-and-sell-stock/description/
+65. [x] Best Time to Buy and Sell Stock II https://leetcode.com/problems/best-time-to-buy-and-sell-stock-ii/
+66. [ ] Best Time to Buy and Sell Stock with Cooldown
+67. [ ] Burst Balloons
+68. [ ] Interleaving String
+69. [ ] Distinct Subsequences
+70. [ ] Russian Doll Envelopes
+71. [ ] Triangle
 
 **Daily:** 3-4 problems | **Time:** 2-2.5 hours (DP takes longer initially)
 
@@ -132,26 +132,26 @@
 
 ### Graph Traversal (12 problems)
 
-71. [ ] **Number of Islands** ⭐⭐⭐
+71. [x] **Number of Islands** ⭐⭐⭐ https://leetcode.com/problems/number-of-islands/
 72. [ ] **Clone Graph** ⭐⭐⭐
-73. [ ] Max Area of Island
+73. [x] Max Area of Island https://leetcode.com/problems/max-area-of-island/description/
 74. [ ] Pacific Atlantic Water Flow
-75. [ ] **Course Schedule** ⭐⭐⭐
-76. [ ] **Course Schedule II** ⭐⭐⭐
+75. [x] **Course Schedule** ⭐⭐⭐ https://leetcode.com/problems/course-schedule/
+76. [x] **Course Schedule II** ⭐⭐⭐ https://leetcode.com/problems/course-schedule-ii/
 77. [ ] Number of Connected Components / Number of Provinces
 78. [ ] Graph Valid Tree
-79. [ ] **Word Ladder** ⭐⭐
+79. [x] **Word Ladder** ⭐⭐ https://leetcode.com/problems/word-ladder/
 80. [ ] Rotting Oranges
 81. [ ] **Network Delay Time (Dijkstra)** ⭐⭐
 82. [ ] Redundant Connection (Union Find)
 
 ### Backtracking (8 problems)
 
-83. [ ] Permutations
-84. [ ] Combinations
-85. [ ] Combination Sum
-86. [ ] Subsets
-87. [ ] **Generate Parentheses** ⭐⭐
+83. [x] Permutations https://leetcode.com/problems/permutations/
+84. [x] Combinations https://leetcode.com/problems/combinations/
+85. [x] Combination Sum https://leetcode.com/problems/combination-sum/
+86. [x] Subsets https://leetcode.com/problems/subsets/
+87. [x] **Generate Parentheses** ⭐⭐ https://leetcode.com/problems/generate-parentheses/
 88. [ ] Word Search
 89. [ ] Palindrome Partitioning
 90. [ ] N-Queens
@@ -166,16 +166,16 @@
 
 ### Heaps & Advanced (10 problems)
 
-91. [ ] **Kth Largest Element** ⭐⭐⭐
-92. [ ] Top K Frequent Elements (revise)
+91. [x] **Kth Largest Element** ⭐⭐⭐ https://leetcode.com/problems/kth-largest-element-in-an-array/
+92. [x] Top K Frequent Elements (revise) https://leetcode.com/problems/top-k-frequent-elements/
 93. [ ] **Task Scheduler** ⭐⭐
 94. [ ] **Find Median from Data Stream** ⭐⭐⭐
 95. [ ] K Closest Points to Origin
-96. [ ] Meeting Rooms II
-97. [ ] **Min Stack** ⭐⭐
+96. [x] Meeting Rooms II  https://neetcode.io/problems/meeting-schedule-ii/question
+97. [x] **Min Stack** ⭐⭐ https://leetcode.com/problems/min-stack/
 98. [ ] Largest Rectangle in Histogram
-99. [ ] Evaluate Reverse Polish Notation
-100. [ ] Next Greater Element II
+99. [x] Evaluate Reverse Polish Notation https://leetcode.com/problems/evaluate-reverse-polish-notation/description/
+100. [x] Next Greater Element II https://leetcode.com/problems/next-greater-element-ii/
 
 ### Mock Interview Practice (Day 6-7)
 

@@ -120,9 +120,9 @@
 * **ZooKeeper mode**: ZooKeeper detects failure → controller elects leader.
 * **KRaft mode**: Kafka uses **Raft quorum** internally → faster, simpler leader election.
 
-  
 ---
-* [x] Why Kafka was developed, when already had TIBCO,RabbitMQ?
+
+* [x] **Why Kafka was developed, when already had TIBCO,RabbitMQ?**
     * Earlier systems were queues; Kafka was the first widely adopted distributed commit log built for large-scale event streaming.
     * What Kafka Introduced (New Concept)
         * Immutable, append-only distributed log
@@ -187,7 +187,8 @@
 ---
 * [x] **How does partition assignment work in consumer groups?**
     * Partition assignment is handled by the group leader using an assignor strategy to evenly and safely distribute partitions among consumers.
-* [ ] Explain offset management - auto-commit vs manual commit
+---
+* [x] **Explain offset management - auto-commit vs manual commit**
     * Auto-commit: Kafka commits offsets automatically at intervals.
         * ✔ Simple, ❌ risk of message loss if processing fails after commit.
     * Manual commit: Application commits offsets after successful processing.
@@ -313,8 +314,8 @@ In **Apache Kafka**, rebalancing occurs when consumers join/leave or partitions 
   → Avoid unnecessary rebalances.
     * New consumer joins → only a few partitions move instead of all.
 
-
-* [ ] How to add/remove brokers from a cluster?
+---
+* [x] **How to add/remove brokers from a cluster?**
   ![Image](https://www.michael-noll.com/assets/uploads/kafka-cluster-overview.png)
 
 ![Image](https://cdn.prod.website-files.com/68ed36e99e31581dedf5dcb1/690211c9f9eb9f1dc940f5e6_66a3d48228e3e933f5ee5e50_66880f0749f675709dbf3c22_guide-kafka-partition-img4.png)
@@ -378,9 +379,9 @@ In **Apache Kafka**, **Kafka Streams** and **Kafka Connect** serve different pur
     * Uses **connectors** (source/sink), **no business logic code**.
     * Runs as a **separate service/cluster**.
     * **Example**: Sync MySQL → Kafka → Elasticsearch.
+---
 
-
-* [ ] **How to implement dead letter queue in Kafka?**
+* [x] **How to implement dead letter queue in Kafka?**
     * A DLQ in Kafka is a separate topic where messages are sent after retry exhaustion, allowing the main consumer to continue processing.
   ```java
   @KafkaListener(topics = "orders", groupId = "order-group")

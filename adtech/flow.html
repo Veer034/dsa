@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Programmatic Ad System - HLD</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            padding: 40px 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+
+        h1 {
+            text-align: center;
+            color: #1e40af;
+            margin-bottom: 10px;
+            font-size: 32px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #64748b;
+            margin-bottom: 40px;
+            font-size: 16px;
+        }
+
+        .diagram {
+            position: relative;
+            padding: 20px;
+        }
+
+        /* Component Boxes */
+        .component {
+            border: 3px solid;
+            border-radius: 8px;
+            padding: 20px;
+            background: white;
+            position: relative;
+            min-height: 100px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+
+        .component-title {
+            font-weight: bold;
+            font-size: 16px;
+            margin-bottom: 8px;
+        }
+
+        .component-subtitle {
+            font-size: 12px;
+            color: #64748b;
+            margin-bottom: 4px;
+        }
+
+        .component-tech {
+            font-size: 11px;
+            color: #94a3b8;
+            font-style: italic;
+        }
+
+        /* Color Coding */
+        .user { border-color: #10b981; background: #f0fdf4; }
+        .publisher { border-color: #3b82f6; background: #eff6ff; }
+        .dsp { border-color: #8b5cf6; background: #f5f3ff; }
+        .advertiser { border-color: #f59e0b; background: #fffbeb; }
+        .storage { border-color: #ef4444; background: #fef2f2; }
+        .messaging { border-color: #ec4899; background: #fdf2f8; }
+
+        /* Layout Grid */
+        .flow-container {
+            display: grid;
+            gap: 30px;
+            margin-bottom: 50px;
+        }
+
+        .row {
+            display: flex;
+            gap: 30px;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .box {
+            flex: 1;
+            max-width: 280px;
+        }
+
+        /* Arrows */
+        .arrow {
+            font-size: 28px;
+            color: #3b82f6;
+            font-weight: bold;
+        }
+
+        .arrow-down {
+            text-align: center;
+            font-size: 32px;
+            color: #3b82f6;
+            margin: 10px 0;
+        }
+
+        /* Numbers */
+        .step-number {
+            position: absolute;
+            top: -12px;
+            left: -12px;
+            background: #3b82f6;
+            color: white;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 14px;
+            box-shadow: 0 2px 8px rgba(59, 130, 246, 0.4);
+        }
+
+        /* Legend */
+        .legend {
+            display: flex;
+            gap: 30px;
+            justify-content: center;
+            margin-top: 40px;
+            flex-wrap: wrap;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .legend-box {
+            width: 30px;
+            height: 30px;
+            border: 3px solid;
+            border-radius: 4px;
+        }
+
+        /* Database Icons */
+        .tech-stack {
+            font-size: 10px;
+            margin-top: 8px;
+            padding: 4px 8px;
+            background: #f1f5f9;
+            border-radius: 4px;
+            display: inline-block;
+        }
+
+        .section-title {
+            font-size: 20px;
+            font-weight: bold;
+            color: #1e40af;
+            margin: 40px 0 20px 0;
+            text-align: center;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .parallel-box {
+            border: 2px dashed #8b5cf6;
+            padding: 20px;
+            border-radius: 8px;
+            background: #faf5ff;
+        }
+
+        .parallel-title {
+            font-size: 14px;
+            font-weight: bold;
+            color: #8b5cf6;
+            margin-bottom: 15px;
+            text-align: center;
+        }
+
+        .mini-boxes {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+        }
+
+        .mini-box {
+            border: 2px solid #8b5cf6;
+            padding: 12px;
+            border-radius: 6px;
+            background: white;
+            font-size: 11px;
+            text-align: center;
+            min-width: 100px;
+        }
+
+        .data-stores {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            margin-top: 30px;
+        }
+
+        .data-store {
+            border: 2px solid #ef4444;
+            padding: 15px;
+            border-radius: 8px;
+            background: #fef2f2;
+            text-align: center;
+            min-width: 150px;
+        }
+
+        .data-store-title {
+            font-weight: bold;
+            color: #dc2626;
+            margin-bottom: 5px;
+        }
+
+        .data-store-desc {
+            font-size: 11px;
+            color: #64748b;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Programmatic Ad System - High Level Design</h1>
+    <p class="subtitle">Real-Time Bidding (RTB) Architecture with Publisher SSP, DSP & Advertiser Ad Server</p>
+
+    <div class="section-title">Main RTB Auction Flow</div>
+
+    <div class="flow-container">
+        <!-- Step 1: User Request -->
+        <div class="row">
+            <div class="box component user">
+                <div class="step-number">1</div>
+                <div class="component-title">👤 User Browser</div>
+                <div class="component-subtitle">Visits publisher website</div>
+                <div class="component-tech">HTTP Request</div>
+            </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <!-- Step 2: Publisher Ad Server -->
+        <div class="row">
+            <div class="box component publisher">
+                <div class="step-number">2</div>
+                <div class="component-title">📰 Publisher Ad Server (SSP)</div>
+                <div class="component-subtitle">Creates Auction</div>
+                <div class="tech-stack">MySQL + Redis + Kafka</div>
+                <div class="component-tech">Port: 8080</div>
+            </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <!-- Step 3: Bid Requests to DSPs (Parallel) -->
+        <div class="parallel-box">
+            <div class="parallel-title">Step 3: Parallel Bid Requests (100ms timeout)</div>
+            <div class="mini-boxes">
+                <div class="mini-box">
+                    <strong>DSP 1</strong><br>
+                    Internal
+                </div>
+                <div class="mini-box">
+                    <strong>DSP 2</strong><br>
+                    External
+                </div>
+                <div class="mini-box">
+                    <strong>DSP 3</strong><br>
+                    External
+                </div>
+                <div class="mini-box">
+                    <strong>DSP N</strong><br>
+                    External
+                </div>
+            </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <!-- Step 4: DSP Processing -->
+        <div class="row">
+            <div class="box component dsp">
+                <div class="step-number">4</div>
+                <div class="component-title">🎯 DSP Logic</div>
+                <div class="component-subtitle">Targeting • Budget • Pacing</div>
+                <div class="tech-stack">MySQL + Redis</div>
+                <div class="component-tech">Port: 8081</div>
+            </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <!-- Step 5: Bid Responses -->
+        <div class="row">
+            <div class="box component dsp" style="max-width: 600px;">
+                <div class="step-number">5</div>
+                <div class="component-title">💰 Bid Responses</div>
+                <div class="component-subtitle">Each DSP returns bid amount + ad tag URL</div>
+                <div class="component-tech">BidResponse(bidAmount, adTagUrl, creativeId)</div>
+            </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <!-- Step 6: Auction -->
+        <div class="row">
+            <div class="box component publisher" style="max-width: 600px;">
+                <div class="step-number">6</div>
+                <div class="component-title">⚖️ Run Auction (Second-Price)</div>
+                <div class="component-subtitle">Winner = Highest bid ≥ floor price</div>
+                <div class="component-tech">Apply priority boost for internal DSPs</div>
+            </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <!-- Step 7: Return Ad Tag URL -->
+        <div class="row">
+            <div class="box component publisher" style="max-width: 600px;">
+                <div class="step-number">7</div>
+                <div class="component-title">📤 Return Ad Tag URL to Browser</div>
+                <div class="component-subtitle">Publisher returns winner's adTagUrl</div>
+                <div class="component-tech">HTTP Response with ad tag pointing to Advertiser Server</div>
+            </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <!-- Step 8: Browser Fetches Creative -->
+        <div class="row">
+            <div class="box component user" style="max-width: 600px;">
+                <div class="step-number">8</div>
+                <div class="component-title">🌐 Browser Makes Direct Request</div>
+                <div class="component-subtitle">User's browser calls Advertiser Ad Server</div>
+                <div class="component-tech">HTTP GET to adTagUrl (e.g., advertiser.com/serve?creativeId=123)</div>
+            </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <!-- Step 9: Advertiser Serves Creative -->
+        <div class="row">
+            <div class="box component advertiser">
+                <div class="step-number">9</div>
+                <div class="component-title">🎨 Advertiser Ad Server</div>
+                <div class="component-subtitle">Serve creative HTML/Image + Track impression</div>
+                <div class="tech-stack">MySQL + CDN</div>
+                <div class="component-tech">Port: 8082 (Separate infrastructure)</div>
+            </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <!-- Step 10: Render Ad -->
+        <div class="row">
+            <div class="box component user">
+                <div class="step-number">10</div>
+                <div class="component-title">👁️ Ad Rendered in Browser</div>
+                <div class="component-subtitle">User sees ad</div>
+                <div class="component-tech">Two tracking pixels fire simultaneously</div>
+            </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <!-- Step 11: Dual Tracking -->
+        <div style="display: flex; gap: 30px; justify-content: center; align-items: start;">
+            <div class="box component publisher" style="max-width: 400px;">
+                <div class="step-number">11a</div>
+                <div class="component-title">📊 Publisher Tracking</div>
+                <div class="component-subtitle">Impression pixel → Kafka → ScyllaDB</div>
+                <div class="component-tech">Internal analytics</div>
+            </div>
+
+            <div class="box component advertiser" style="max-width: 400px;">
+                <div class="step-number">11b</div>
+                <div class="component-title">📊 Advertiser Tracking</div>
+                <div class="component-subtitle">Impression pixel to their server</div>
+                <div class="component-tech">Separate analytics</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Data Processing Pipeline -->
+    <div class="section-title">Real-Time Analytics Pipeline</div>
+
+    <div style="display: flex; gap: 20px; justify-content: center; margin-bottom: 40px; align-items: center;">
+        <div class="data-store" style="min-width: 200px;">
+            <div class="data-store-title">📨 Kafka Topics</div>
+            <div class="data-store-desc">auction-events<br>impression-events<br>click-events</div>
+        </div>
+
+        <div style="font-size: 32px; color: #3b82f6;">→</div>
+
+        <div class="data-store" style="min-width: 200px; border-color: #8b5cf6; background: #f5f3ff;">
+            <div class="data-store-title" style="color: #8b5cf6;">⚡ Apache Flink</div>
+            <div class="data-store-desc">Stream Processing<br>Windowed Aggregations<br>Real-time Metrics</div>
+        </div>
+
+        <div style="font-size: 32px; color: #3b82f6;">→</div>
+
+        <div class="data-store" style="min-width: 200px; border-color: #10b981; background: #f0fdf4;">
+            <div class="data-store-title" style="color: #10b981;">📈 ScyllaDB</div>
+            <div class="data-store-desc">Time-series Storage<br>Hourly Metrics<br>Fast Queries</div>
+        </div>
+    </div>
+
+    <!-- Data Stores Section -->
+    <div class="section-title">Data Storage Layer</div>
+    <div class="data-stores">
+        <div class="data-store">
+            <div class="data-store-title">🗄️ MySQL</div>
+            <div class="data-store-desc">Campaigns, Ad Slots,<br>Auctions, Impressions</div>
+        </div>
+        <div class="data-store">
+            <div class="data-store-title">⚡ Redis</div>
+            <div class="data-store-desc">Caching, Budget,<br>Frequency Caps</div>
+        </div>
+        <div class="data-store">
+            <div class="data-store-title">📨 Kafka</div>
+            <div class="data-store-desc">Event Streaming,<br>Internal Events Only</div>
+        </div>
+        <div class="data-store">
+            <div class="data-store-title">📈 ScyllaDB</div>
+            <div class="data-store-desc">Time-series Analytics,<br>Real-time Metrics</div>
+        </div>
+    </div>
+
+    <!-- Analytics APIs Section -->
+    <div class="section-title">Analytics REST APIs</div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin-bottom: 30px;">
+        <!-- Publisher Analytics -->
+        <div style="border: 2px solid #3b82f6; border-radius: 8px; padding: 20px; background: #eff6ff;">
+            <h3 style="color: #3b82f6; margin-bottom: 15px; font-size: 18px;">📊 Publisher Analytics APIs</h3>
+            <div style="background: white; border-radius: 6px; padding: 15px; margin-bottom: 10px;">
+                <div style="font-weight: bold; color: #1e40af; margin-bottom: 8px;">GET /api/v1/analytics/dashboard</div>
+                <div style="font-size: 12px; color: #64748b;">Returns: Total auctions, impressions, revenue, fill rate, avg CPM</div>
+            </div>
+            <div style="background: white; border-radius: 6px; padding: 15px; margin-bottom: 10px;">
+                <div style="font-weight: bold; color: #1e40af; margin-bottom: 8px;">GET /api/v1/analytics/slots/{slotId}/performance</div>
+                <div style="font-size: 12px; color: #64748b;">Returns: Slot performance with hourly breakdown</div>
+            </div>
+            <div style="background: white; border-radius: 6px; padding: 15px;">
+                <div style="font-weight: bold; color: #1e40af; margin-bottom: 8px;">GET /api/v1/analytics/dsps/performance</div>
+                <div style="font-size: 12px; color: #64748b;">Returns: DSP win rates, avg bids, total spend</div>
+            </div>
+        </div>
+
+        <!-- Advertiser Analytics -->
+        <div style="border: 2px solid #f59e0b; border-radius: 8px; padding: 20px; background: #fffbeb;">
+            <h3 style="color: #f59e0b; margin-bottom: 15px; font-size: 18px;">📊 Advertiser Analytics APIs</h3>
+            <div style="background: white; border-radius: 6px; padding: 15px; margin-bottom: 10px;">
+                <div style="font-weight: bold; color: #d97706; margin-bottom: 8px;">GET /api/v1/analytics/dashboard</div>
+                <div style="font-size: 12px; color: #64748b;">Returns: Impressions, clicks, conversions, CTR, CVR, ROAS</div>
+            </div>
+            <div style="background: white; border-radius: 6px; padding: 15px; margin-bottom: 10px;">
+                <div style="font-weight: bold; color: #d97706; margin-bottom: 8px;">GET /api/v1/analytics/campaigns/{id}/performance</div>
+                <div style="font-size: 12px; color: #64748b;">Returns: Campaign metrics with hourly data</div>
+            </div>
+            <div style="background: white; border-radius: 6px; padding: 15px;">
+                <div style="font-weight: bold; color: #d97706; margin-bottom: 8px;">GET /api/v1/analytics/creatives/performance</div>
+                <div style="font-size: 12px; color: #64748b;">Returns: Creative performance comparison</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Metrics Explained -->
+    <div style="border: 2px solid #8b5cf6; border-radius: 8px; padding: 20px; background: #f5f3ff; margin-bottom: 30px;">
+        <h3 style="color: #8b5cf6; margin-bottom: 15px; font-size: 18px;">📈 Key Metrics</h3>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px;">
+            <div style="background: white; padding: 12px; border-radius: 6px;">
+                <div style="font-weight: bold; color: #7c3aed; font-size: 14px;">Fill Rate</div>
+                <div style="font-size: 11px; color: #64748b; margin-top: 4px;">Impressions / Auctions × 100</div>
+            </div>
+            <div style="background: white; padding: 12px; border-radius: 6px;">
+                <div style="font-weight: bold; color: #7c3aed; font-size: 14px;">CPM (Cost Per Mille)</div>
+                <div style="font-size: 11px; color: #64748b; margin-top: 4px;">Revenue / Impressions × 1000</div>
+            </div>
+            <div style="background: white; padding: 12px; border-radius: 6px;">
+                <div style="font-weight: bold; color: #7c3aed; font-size: 14px;">Win Rate</div>
+                <div style="font-size: 11px; color: #64748b; margin-top: 4px;">Wins / Total Bids × 100</div>
+            </div>
+            <div style="background: white; padding: 12px; border-radius: 6px;">
+                <div style="font-weight: bold; color: #7c3aed; font-size: 14px;">CTR (Click-Through Rate)</div>
+                <div style="font-size: 11px; color: #64748b; margin-top: 4px;">Clicks / Impressions × 100</div>
+            </div>
+            <div style="background: white; padding: 12px; border-radius: 6px;">
+                <div style="font-weight: bold; color: #7c3aed; font-size: 14px;">CVR (Conversion Rate)</div>
+                <div style="font-size: 11px; color: #64748b; margin-top: 4px;">Conversions / Clicks × 100</div>
+            </div>
+            <div style="background: white; padding: 12px; border-radius: 6px;">
+                <div style="font-weight: bold; color: #7c3aed; font-size: 14px;">ROAS (Return on Ad Spend)</div>
+                <div style="font-size: 11px; color: #64748b; margin-top: 4px;">Revenue / Spend</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Legend -->
+    <div class="legend">
+        <div class="legend-item">
+            <div class="legend-box user"></div>
+            <span>User/Browser</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-box publisher"></div>
+            <span>Publisher SSP</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-box dsp"></div>
+            <span>DSP Platform</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-box advertiser"></div>
+            <span>Advertiser Server</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-box storage"></div>
+            <span>Data Storage</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-box messaging"></div>
+            <span>Event/Messaging</span>
+        </div>
+    </div>
+</div>
+</body>
+</html>

@@ -15,102 +15,162 @@
     * Redis provides specialized data structures optimized for speed, scalability, and specific access patterns, making it ideal for caching, messaging, analytics, and real-time systems.
 
 ![Image](https://media.licdn.com/dms/image/v2/D4E12AQEUTqxcuPgyoQ/article-cover_image-shrink_600_2000/article-cover_image-shrink_600_2000/0/1674494655446?e=2147483647\&t=SZHK8-G4v_Dk4alpCngtq1eJVVwdPIYSaigywXMd0d4\&v=beta)
+Below is the **same `.md` format**, but now each example explains **what actually happens inside Redis**, not just the command.
+
+---
+
 * **1. String**
 
-    * Simplest key–value (max 512MB).
+    * Simplest key–value (stored as raw bytes, optimized internally).
     * **Use**: cache, counters, tokens.
+    * **What happens internally**:
+
+        * Redis stores `page_views` as a single value.
+        * `INCR` is **atomic** → no race condition even with many clients.
     * **Example**:
 
       ```
-      SET page_views 100
-      INCR page_views
+      SET page_views 100      # Redis stores: key=page_views, value=100
+      INCR page_views         # Redis reads 100, increments to 101, writes back atomically
       ```
+
+---
 
 * **2. List**
 
-    * Ordered collection (linked list).
+    * Ordered collection (implemented as **quicklist**: linked list of ziplists).
     * **Use**: queues, task pipelines.
+    * **What happens internally**:
+
+        * `LPUSH` adds element to head.
+        * `RPOP` removes from tail → FIFO queue.
+        * O(1) push/pop.
     * **Example**:
 
       ```
-      LPUSH jobs job1
-      RPOP jobs
+      LPUSH jobs job1         # jobs -> [job1]
+      LPUSH jobs job2         # jobs -> [job2, job1]
+      RPOP jobs               # returns job1, jobs -> [job2]
       ```
 
-
+---
 
 * **3. Set**
 
-    * Unordered, unique elements.
+    * Unordered collection, unique elements (hash table internally).
     * **Use**: unique users, tags.
+    * **What happens internally**:
+
+        * Redis hashes each element.
+        * Duplicate inserts are ignored.
+        * Membership check is O(1).
     * **Example**:
 
       ```
-      SADD online_users u1 u2
-      SISMEMBER online_users u1
+      SADD online_users u1 u2 u2   # stored: {u1, u2}
+      SISMEMBER online_users u1    # hash lookup → true
       ```
 
+---
 
 * **4. Sorted Set (ZSet)**
 
-    * Set + score (ordered by score).
+    * Set + score (skiplist + hash table).
     * **Use**: leaderboards, ranking.
+    * **What happens internally**:
+
+        * Hash → fast lookup by member.
+        * Skiplist → ordered traversal by score.
     * **Example**:
 
       ```
       ZADD leaderboard 100 user1
-      ZRANGE leaderboard 0 10 WITHSCORES
+      ZADD leaderboard 200 user2
+      ZRANGE leaderboard 0 1 WITHSCORES
+      # Redis walks skiplist from lowest score
       ```
 
-
+---
 
 * **5. Hash**
 
-    * Key → field → value (like a row).
+    * Key → field → value (like a row in DB).
     * **Use**: objects (user profile).
+    * **What happens internally**:
+
+        * Small hashes stored as compact structure.
+        * Large hashes converted to hash table.
+        * Avoids many small keys.
     * **Example**:
 
       ```
       HSET user:1 name "Alex" age 30
       HGET user:1 name
+      # Redis fetches field "name" from hash user:1
       ```
 
-
+---
 
 * **6. Bitmap**
 
     * Bit-level operations on strings.
     * **Use**: flags, daily active users.
+    * **What happens internally**:
+
+        * Redis treats string as bit array.
+        * Bit offset = userId (or index).
+        * Extremely memory efficient.
     * **Example**:
 
       ```
       SETBIT login:2026-01-07 123 1
       GETBIT login:2026-01-07 123
+      # Redis flips and reads a single bit in memory
       ```
 
+---
 
 * **7. HyperLogLog**
 
-    * Probabilistic structure (very low memory).
-    * **Use**: count unique items approximately.
+    * Probabilistic structure (~12KB fixed memory).
+    * **Use**: approximate unique counts.
+    * **What happens internally**:
+
+        * Hashes input values.
+        * Tracks max leading-zero patterns.
+        * Returns approximate cardinality.
     * **Example**:
 
       ```
-      PFADD visitors u1 u2 u3
+      PFADD visitors u1 u2 u3 u2
       PFCOUNT visitors
+      # Redis estimates unique count, not exact
       ```
+
+---
 
 * **8. Streams**
 
     * Append-only log with consumer groups.
     * **Use**: event streaming, async processing.
+    * **What happens internally**:
+
+        * Each entry gets a monotonic ID.
+        * Consumer group tracks offsets.
+        * Messages stay until trimmed.
     * **Example**:
 
       ```
       XADD orders * orderId 101 status created
       XREAD STREAMS orders 0
+      # Redis reads entries starting from ID 0
       ```
 
+---
+
+### Interview-ready one-liner
+
+> “Redis data structures are not just types—they are specialized in-memory algorithms optimized for specific access patterns.”
 
 ---
 * [x] **What is the difference between Redis and Memcached?**
@@ -123,23 +183,23 @@
       | Atomic ops   | Yes                                           | Limited              |
       | Memory usage | Slightly higher                               | Very efficient       |
       | Scalability  | Clustering + replication                      | Client-side sharding |
-
-    * [ ] **Is Redis single-threaded or multi-threaded?**
-        * Redis is hybrid. Command execution is single-threaded, but Redis 6.0+ uses additional threads for network I/O and background tasks like persistence.
-        * **Why single-threaded for commands?**
-            * Operations are extremely fast (microseconds) because data is in-memory
-            * Multi-threading would add locking overhead that's slower than the operations themselves
-            * No context switching or synchronization needed
-        * **Why is it fast then?**
-            * All data in RAM - no disk I/O waits
-            * Simple, optimized C code
-            * No locking overhead
-            * Event loop handles I/O efficiently without blocking
-        * **Can't multiple threads use multiple cores better?**
-            * For Redis, no. When operations take microseconds, thread synchronization overhead makes it slower.
-            * **To use multiple cores:**
-                * Run multiple Redis instances (one per core)
-                * Use Redis Cluster (auto-sharding across nodes)
+---
+* [x] **Is Redis single-threaded or multi-threaded?**
+    * Redis is hybrid. Command execution is single-threaded, but Redis 6.0+ uses additional threads for network I/O and background tasks like persistence.
+    * **Why single-threaded for commands?**
+        * Operations are extremely fast (microseconds) because data is in-memory
+        * Multi-threading would add locking overhead that's slower than the operations themselves
+        * No context switching or synchronization needed
+    * **Why is it fast then?**
+        * All data in RAM - no disk I/O waits
+        * Simple, optimized C code
+        * No locking overhead
+        * Event loop handles I/O efficiently without blocking
+    * **Can't multiple threads use multiple cores better?**
+        * For Redis, no. When operations take microseconds, thread synchronization overhead makes it slower.
+        * **To use multiple cores:**
+            * Run multiple Redis instances (one per core)
+            * Use Redis Cluster (auto-sharding across nodes)
 
 ### Data Structures & Commands
 * [x] **When to use List vs Set vs Sorted Set?**
@@ -149,7 +209,7 @@
 
 * [x] **How to implement rate limiting using Redis?**
     * Simple approach: Use a String key with expiry and INCR command.
-    * ```
+  ```
     # Allow 100 requests per minute per user
     key = "rate:limit:user123"
     INCR key
@@ -157,7 +217,7 @@
     GET key  # if > 100, reject request
     ```
     * Better approach (sliding window): Use Sorted Set with timestamps as scores, remove old entries, count remaining.
-    * ```
+  ```
     ZADD rate:user123 <timestamp> <request_id>
     ZREMRANGEBYSCORE rate:user123 0 <60_seconds_ago>
     ZCARD rate:user123  # if > 100, reject
@@ -165,8 +225,9 @@
 ---
 * [x] **Explain INCR, INCRBY, and their atomic nature**
     * **INCR:** Increments a key's value by 1. If key doesn't exist, sets it to 0 then increments to 1.
-      **INCRBY:** Increments by a specified amount. INCRBY counter 5 adds 5 to the counter.
-      **Atomic nature:** Both operations are atomic - they read, increment, and write in a single step with no possibility of race conditions. Even with 1000 concurrent clients, each increment is guaranteed to execute completely before the next one, ensuring accurate counts without locks.
+    * **INCRBY:** Increments by a specified amount. INCRBY counter 5 adds 5 to the counter.
+    * **Atomic nature:** Both operations are atomic - they read, increment, and write in a single step with no 
+       possibility of race conditions. Even with 1000 concurrent clients, each increment is guaranteed to execute completely before the next one, ensuring accurate counts without locks.
 ---
 * [x] **What are Pub/Sub in Redis?**
     * Pub/Sub is Redis's messaging system where publishers send messages to channels and subscribers receive them in real-time.
@@ -189,7 +250,7 @@
     * **RDB (Redis Database):** Point-in-time snapshots saved to disk at intervals (e.g., every 5 minutes). Fast to load, compact file size, but can lose data between snapshots.
     * **AOF (Append-Only File):** Logs every write command to disk. More durable (can lose only 1 second of data), but larger files and slower restart.
     * **Best practice:** Use both - RDB for fast restarts, AOF for durability. Redis can rebuild from AOF if crash occurs between RDB snapshots.
-    * ```
+  ```
     # config
     save 900 1          # RDB: save after 900 sec if 1 key changed
     appendonly yes      # AOF: enable
@@ -199,7 +260,7 @@
 ---
 * [x] **How persistence doesn't slow down Redis?**
     * **RDB snapshots:**
-        * ```
+      ```
       Main thread: [serving requests at full speed]
       Background thread: [fork process → write snapshot to disk]
       ```
@@ -207,7 +268,7 @@
         * Child writes snapshot while parent continues serving requests
         * No blocking of main operations
     * **AOF writes:**
-        * ```
+      ```
       Main thread: [execute command] → [append to AOF buffer in memory]
       Background thread: [flush buffer to disk every 1 second]
       ```
@@ -399,7 +460,7 @@
 
 
 ---
-* [x] Why choose Redis is production?
+* [x] **Why choose Redis is production?**
     * We evaluated Redis, Memcached, and [X]. Redis won because we needed persistence for session data, sorted sets for leaderboards, and pub/sub for cache invalidation. The operational maturity, community support, and our team's existing expertise made it a safe choice. We use Redis Cluster in production with RDB+AOF persistence, handling 100K+ ops/sec with sub-millisecond latency.
     * **Why Not Others:**
         * **Not Memcached:** No persistence, limited data types, no built-in HA
@@ -543,21 +604,20 @@
         - Keys without expiry are never evicted
         - **Use**: Mix of permanent and temporary data
 
+    * **volatile-lfu**
+        - Evicts LFU keys **only from keys with TTL set**
+        - Frequency-based eviction for expiring keys only
+        - **Use**: Similar to volatile-lru but popularity-based
 
-* **volatile-lfu**
-    - Evicts LFU keys **only from keys with TTL set**
-    - Frequency-based eviction for expiring keys only
-    - **Use**: Similar to volatile-lru but popularity-based
+    * **volatile-ttl**
+        - Evicts keys with **shortest remaining TTL first**
+        - Prioritizes removing soon-to-expire keys
+        - **Use**: When expiry time indicates importance
 
-* **volatile-ttl**
-    - Evicts keys with **shortest remaining TTL first**
-    - Prioritizes removing soon-to-expire keys
-    - **Use**: When expiry time indicates importance
-
-* **volatile-random**
-    - Randomly evicts keys **only from keys with TTL**
-    - Random selection among expiring keys
-    - **Use**: Simple eviction for temporary data
+    * **volatile-random**
+        - Randomly evicts keys **only from keys with TTL**
+        - Random selection among expiring keys
+        - **Use**: Simple eviction for temporary data
 
 * **Quick Selection Guide**
 
@@ -591,7 +651,7 @@
 ---
 * [x] **What is pipelining in Redis?**
     * Pipelining allows sending multiple commands to Redis in one batch without waiting for individual responses. The client sends all commands at once, then reads all responses together, reducing network round-trip time (RTT).
-    * ```
+  ```
     Jedis jedis = new Jedis("localhost");
     Pipeline pipeline = jedis.pipelined();
   

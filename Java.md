@@ -9,7 +9,8 @@
 * [x] **What are marker interfaces? Give examples**
     * **Marker interfaces** are empty interfaces (no methods) used to **mark a class** so that JVM or libraries apply **special behavior**.
       They are checked using `instanceof` or reflection.
-      **Examples:** `Serializable` (allows object serialization), `Cloneable` (enables `clone()`), `RandomAccess` (fast indexed access in lists).
+    *  **Examples:** `Serializable` (allows object serialization), `Cloneable` (enables `clone()`), `RandomAccess` 
+       (fast indexed access in lists).
 
 ---
 * [x] **Difference between abstract class and interface in Java 8+**
@@ -96,7 +97,54 @@
   > TreeMap is sorted due to its **tree-based implementation + SortedMap/NavigableMap contract**, others are not because they are **hash-based or list-ordered**, not comparison-based.
 
 ---
-* [x] **What is the time complexity of various operations in different collections?**
+* [x] ***Time Complexity - Collections:**
+
+| Collection | get/access | add | remove | contains/search |
+|------------|-----------|-----|--------|----------------|
+| **ArrayList** | O(1) | O(1)* | O(n) | O(n) |
+| **LinkedList** | O(n) | O(1) | O(n) | O(n) |
+| **HashMap** | O(1)* | O(1)* | O(1)* | O(1)* |
+| **TreeMap** | O(log n) | O(log n) | O(log n) | O(log n) |
+| **HashSet** | - | O(1)* | O(1)* | O(1)* |
+| **TreeSet** | - | O(log n) | O(log n) | O(log n) |
+| **LinkedHashMap** | O(1)* | O(1)* | O(1)* | O(1)* |
+| **LinkedHashSet** | - | O(1)* | O(1)* | O(1)* |
+
+**Notes:**
+- `*` = amortized/average case
+- ArrayList `add`: O(1) amortized, O(n) when resizing
+- HashMap/HashSet: O(log n) worst case (tree collision handling)
+- LinkedList `add`: O(1) at ends, O(n) at middle
+
+---
+* [x] **Comparable vs Comparator:**
+
+**Comparable** - Natural ordering inside the class:
+```java
+class Student implements Comparable<Student> {
+    int id;
+    
+    public int compareTo(Student s) {
+        return this.id - s.id;
+    }
+}
+
+Collections.sort(students);  // sorts by id
+```
+
+**Comparator** - Custom ordering outside the class:
+```java
+Comparator<Student> byName = (s1, s2) -> s1.name.compareTo(s2.name);
+
+Collections.sort(students, byName);  // sorts by name
+```
+
+**Key Difference:**
+- **Comparable**: One default way, defined in class
+- **Comparator**: Multiple ways, defined externally
+
+Use Comparable for natural order, Comparator for flexibility.
+
 
 ### Multithreading & Concurrency
 
@@ -147,8 +195,37 @@ public class MyApp {
 
 ---
 * [x] **Explain synchronized keyword and its types (method level, block level)**
+  **Synchronized Keyword:**
+
+Ensures only one thread can access the synchronized code at a time.
+
+**1. Method Level:**
+```java
+public synchronized void method() {
+    // entire method locked
+}
+// Locks on: 'this' object (instance method) or Class object (static method)
+```
+
+**2. Block Level:**
+```java
+public void method() {
+    synchronized(this) {  // or any object
+        // only this block locked
+    }
+}
+// Locks on: specified object
+```
+
+**Key Differences:**
+- **Method level**: Locks entire method, less granular
+- **Block level**: Locks specific section, better performance, more control over lock object
+
+**When to use:**
+- Method level: When entire method needs synchronization
+- Block level: When only part of method needs synchronization (preferred for performance)
 ---
-* [x] What are volatile, atomic variables, and when to use them?
+* [x] **What are volatile, atomic variables, and when to use them?**
   ```text
   Visibility only → volatile 
   Atomic update → Atomic*
@@ -174,7 +251,13 @@ public class MyApp {
           new ArrayBlockingQueue<>(1000), // bounded
           new ThreadPoolExecutor.CallerRunsPolicy()
           );
-
+          ```
+          Tasks < corePoolSize → create new thread
+          Tasks ≥ corePoolSize → add to queue
+          Queue full → create thread up to maxPoolSize
+          All full → apply rejection policy
+          ```
+          
 ---
 * [x] **Explain CountDownLatch, CyclicBarrier, and Semaphore**
     * CountDownLatch → wait until tasks finish
@@ -209,6 +292,56 @@ public class MyApp {
 
 ---
 * [x] **Explain Garbage Collection and types of GC (Serial, Parallel, CMS, G1, ZGC)**
+  **Garbage Collection (GC):**
+
+Automatic memory management - reclaims memory from unreachable objects.
+
+**GC Types:**
+
+**1. Serial GC** (`-XX:+UseSerialGC`):
+- Single thread for GC
+- Stops all application threads (Stop-The-World)
+- Best for: Small apps, single CPU, <100MB heap
+- Simple, low overhead
+
+**2. Parallel GC** (`-XX:+UseParallelGC`):
+- Multiple threads for GC
+- Focus on throughput
+- Best for: Multi-core systems, batch processing
+- Default in Java 8
+
+**3. CMS (Concurrent Mark Sweep)** (`-XX:+UseConcMarkSweepGC`):
+- Runs concurrently with application
+- Low pause times
+- Best for: Applications needing low latency
+- Deprecated in Java 9+, removed in Java 14
+
+**4. G1 GC (Garbage First)** (`-XX:+UseG1GC`):
+- Divides heap into regions
+- Predictable pause times
+- Best for: Large heaps (>4GB), balance throughput + latency
+- Default from Java 9+
+
+**5. ZGC** (`-XX:+UseZGC`):
+- Ultra-low pause times (<10ms)
+- Scales to multi-TB heaps
+- Best for: Large heaps, latency-sensitive apps
+- Production-ready from Java 15+
+
+**Quick Comparison:**
+
+| GC | Pause Time | Throughput | Heap Size | Use Case |
+|---|---|---|---|---|
+| Serial | High | Low | Small | Single CPU |
+| Parallel | High | High | Medium | Batch jobs |
+| CMS | Low | Medium | Medium | Low latency (deprecated) |
+| G1 | Medium | Good | Large | General purpose |
+| ZGC | Very Low | Good | Very Large | Ultra-low latency |
+
+**Key Concepts:**
+- **Minor GC**: Young generation cleanup (fast)
+- **Major GC**: Old generation cleanup (slow)
+- **Full GC**: Entire heap cleanup (slowest)
 ---
 * [x] **How would you identify and fix memory leaks?**
     * In Kubernetes, memory leaks are identified via **Prometheus/Grafana JVM metrics**—if **heap usage after GC

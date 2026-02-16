@@ -158,7 +158,7 @@ CLI = *command sender*, Daemon = *worker*, Engine = *overall system*.
         * **Shared across images:** Multiple images can share the same base layers. If you have 10 images all based on `ubuntu:20.04`, that base layer is stored only once on disk.
         * **Union filesystem:** When you run a container, Docker uses a union filesystem to stack all the layers together, making them appear as a single filesystem. The container also gets a thin writable layer on top where any changes during runtime are stored.
 
-
+---
 * [x] **How to run, stop, and remove containers?**
 
 ![Image](https://miro.medium.com/0%2A3_uIz_YMiyZxMwKn)

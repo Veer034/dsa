@@ -10,50 +10,50 @@
     * A self join joins a table with itself using aliases, commonly used for hierarchical or relational data like employee–manager relationships.
         * Use case: Find each employee with their manager name.
         * ```
-      SELECT e.name AS employee, m.name AS manager
-      FROM Employee e
-      LEFT JOIN Employee m
-      ON e.manager_id = m.emp_id;
-
-      ```
-        * Use case: Find employees under a specific manager.
-          ```
-          SELECT e.name
+          SELECT e.name AS employee, m.name AS manager
           FROM Employee e
-          JOIN Employee m
-          ON e.manager_id = m.emp_id
-          WHERE m.name = 'B';
-          ```
+          LEFT JOIN Employee m
+          ON e.manager_id = m.emp_id;
+
+           ```
+          * Use case: Find employees under a specific manager.
+            ```
+            SELECT e.name
+            FROM Employee e
+            JOIN Employee m
+            ON e.manager_id = m.emp_id
+            WHERE m.name = 'B';
+            ```
 ---
 * [x] **Explain GROUP BY and HAVING clause**
     * GROUP BY aggregates rows into groups, and HAVING filters those groups based on aggregate conditions.
-    * ```
-    # Use case: Total salary per department
-    SELECT dept, SUM(salary) AS total_salary
-    FROM Employee
-    GROUP BY dept;
+* ```
+  # Use case: Total salary per department
+  SELECT dept, SUM(salary) AS total_salary
+  FROM Employee
+  GROUP BY dept;
 
-    # Use case: Departments with total salary > 1,00,000
-    SELECT dept, SUM(salary) AS total_salary
-    FROM Employee
-    GROUP BY dept
-    HAVING SUM(salary) > 100000;
+  # Use case: Departments with total salary > 1,00,000
+  SELECT dept, SUM(salary) AS total_salary
+  FROM Employee
+  GROUP BY dept
+  HAVING SUM(salary) > 100000;
 
-    ```
+  ```
 ---
 * [x] **Difference between WHERE and HAVING**
     * WHERE filters individual rows before aggregation, while HAVING filters aggregated results after GROUP BY.
     * ```
-    FROM
-    → JOIN
-    → WHERE
-    → GROUP BY
-    → HAVING
-    → SELECT
-    → ORDER BY
-    → LIMIT
+      FROM
+      → JOIN
+      → WHERE
+      → GROUP BY
+      → HAVING
+      → SELECT
+      → ORDER BY
+      → LIMIT
 
-    ```
+      ```
 ---
 * [x] **What are aggregate functions?**
     * Aggregate functions compute a single result from multiple rows, commonly used with GROUP BY.

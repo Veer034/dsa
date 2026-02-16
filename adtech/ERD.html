@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AdTech ERD</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: Arial, sans-serif;
+            background: #1a1a2e;
+            color: white;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 40px;
+            color: #00d4ff;
+        }
+        .section {
+            background: #16213e;
+            border-radius: 10px;
+            padding: 30px;
+            margin-bottom: 40px;
+        }
+        .section-title {
+            font-size: 24px;
+            color: #00d4ff;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #00d4ff;
+            padding-bottom: 10px;
+        }
+        .erd-container {
+            position: relative;
+            min-height: 600px;
+        }
+        .table {
+            position: absolute;
+            background: #0f3460;
+            border: 2px solid #00d4ff;
+            border-radius: 8px;
+            min-width: 200px;
+            box-shadow: 0 4px 15px rgba(0, 212, 255, 0.3);
+        }
+        .table-header {
+            background: #00d4ff;
+            color: #000;
+            padding: 10px;
+            font-weight: bold;
+            text-align: center;
+            border-radius: 6px 6px 0 0;
+        }
+        .table-body {
+            padding: 10px;
+        }
+        .field {
+            padding: 5px;
+            font-size: 12px;
+            border-bottom: 1px solid #1a1a2e;
+        }
+        .field.pk {
+            color: #ffd700;
+            font-weight: bold;
+        }
+        .field.fk {
+            color: #90ee90;
+        }
+        svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1;
+        }
+        .relationship {
+            fill: none;
+            stroke: #ff6b6b;
+            stroke-width: 2;
+            marker-end: url(#arrowhead);
+        }
+        .relationship.one-to-many {
+            stroke: #51cf66;
+        }
+        .relationship.one-to-one {
+            stroke: #ffd43b;
+        }
+        .label {
+            fill: white;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        .legend {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            justify-content: center;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #0f3460;
+            padding: 8px 15px;
+            border-radius: 5px;
+        }
+        .legend-line {
+            width: 40px;
+            height: 3px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>📊 AdTech System - Entity Relationship Diagrams</h1>
+
+    <div class="legend">
+        <div class="legend-item">
+            <div class="legend-line" style="background: #51cf66;"></div>
+            <span>One-to-Many (1:N)</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-line" style="background: #ffd43b;"></div>
+            <span>One-to-One (1:1)</span>
+        </div>
+        <div class="legend-item">
+            <span style="color: #ffd700;">● PK</span> = Primary Key
+        </div>
+        <div class="legend-item">
+            <span style="color: #90ee90;">● FK</span> = Foreign Key
+        </div>
+    </div>
+
+    <!-- PUBLISHER ERD -->
+    <div class="section">
+        <div class="section-title">📰 Publisher Ad Server (SSP) - ERD</div>
+        <div class="erd-container" style="height: 700px;">
+            <svg>
+                <defs>
+                    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                        <polygon points="0 0, 10 3, 0 6" fill="#51cf66" />
+                    </marker>
+                </defs>
+
+                <!-- ad_slots to auctions (1:N) -->
+                <path d="M 250 150 L 600 150" class="relationship one-to-many" />
+                <text x="400" y="140" class="label">1:N</text>
+
+                <!-- ad_slots to impressions (1:N) -->
+                <path d="M 250 200 L 350 200 L 350 350 L 600 350" class="relationship one-to-many" />
+                <text x="350" y="270" class="label">1:N</text>
+
+                <!-- dsp_partners to auctions (1:N) -->
+                <path d="M 250 550 L 500 550 L 500 280 L 600 280" class="relationship one-to-many" />
+                <text x="350" y="540" class="label">1:N</text>
+
+                <!-- dsp_partners to impressions (1:N) -->
+                <path d="M 250 600 L 400 600 L 400 420 L 600 420" class="relationship one-to-many" />
+                <text x="350" y="590" class="label">1:N</text>
+
+                <!-- auctions to impressions (1:N) -->
+                <path d="M 750 280 L 750 400" class="relationship one-to-many" />
+                <text x="760" y="310" class="label">1:N</text>
+
+                <!-- auctions to bid_responses (1:N) -->
+                <path d="M 800 200 L 1100 200" class="relationship one-to-many" />
+                <text x="980" y="190" class="label">1:N</text>
+            </svg>
+
+            <!-- ad_slots -->
+            <div class="table" style="left: 20px; top: 80px;">
+                <div class="table-header">ad_slots</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">slot_id (UNIQUE)</div>
+                    <div class="field">page_type</div>
+                    <div class="field">position</div>
+                    <div class="field">width</div>
+                    <div class="field">height</div>
+                    <div class="field">floor_price</div>
+                    <div class="field">status</div>
+                </div>
+            </div>
+
+            <!-- dsp_partners -->
+            <div class="table" style="left: 20px; top: 450px;">
+                <div class="table-header">dsp_partners</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">dsp_id (UNIQUE)</div>
+                    <div class="field">dsp_name</div>
+                    <div class="field">endpoint_url</div>
+                    <div class="field">is_internal</div>
+                    <div class="field">priority</div>
+                    <div class="field">status</div>
+                </div>
+            </div>
+
+            <!-- auctions -->
+            <div class="table" style="left: 600px; top: 80px;">
+                <div class="table-header">auctions</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">auction_id (UNIQUE)</div>
+                    <div class="field fk">🔗 slot_id (FK)</div>
+                    <div class="field">user_id</div>
+                    <div class="field">page_url</div>
+                    <div class="field fk">🔗 winner_dsp_id (FK)</div>
+                    <div class="field">winning_bid</div>
+                    <div class="field">floor_price</div>
+                    <div class="field">num_bids</div>
+                    <div class="field">auction_timestamp</div>
+                </div>
+            </div>
+
+            <!-- impressions -->
+            <div class="table" style="left: 600px; top: 400px;">
+                <div class="table-header">impressions</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">impression_id (UNIQUE)</div>
+                    <div class="field fk">🔗 auction_id (FK)</div>
+                    <div class="field fk">🔗 slot_id (FK)</div>
+                    <div class="field fk">🔗 dsp_id (FK)</div>
+                    <div class="field">revenue</div>
+                    <div class="field">timestamp</div>
+                </div>
+            </div>
+
+            <!-- bid_responses -->
+            <div class="table" style="left: 1100px; top: 120px;">
+                <div class="table-header">bid_responses</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">bid_id (UNIQUE)</div>
+                    <div class="field fk">🔗 auction_id (FK)</div>
+                    <div class="field fk">🔗 dsp_id (FK)</div>
+                    <div class="field">bid_amount</div>
+                    <div class="field">ad_tag_url</div>
+                    <div class="field">creative_id</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- DSP ERD -->
+    <div class="section">
+        <div class="section-title">🎯 DSP (Demand-Side Platform) - ERD</div>
+        <div class="erd-container" style="height: 500px;">
+            <svg>
+                <!-- campaigns to targeting_rules (1:N) -->
+                <path d="M 300 150 L 650 150" class="relationship one-to-many" />
+                <text x="450" y="140" class="label">1:N</text>
+
+                <!-- campaigns to bid_history (1:N) -->
+                <path d="M 300 250 L 650 250" class="relationship one-to-many" />
+                <text x="450" y="240" class="label">1:N</text>
+
+                <!-- campaigns to budget_tracking (1:N) -->
+                <path d="M 300 450 L 650 550" class="relationship one-to-many" />
+                <text x="450" y="340" class="label">1:N</text>
+            </svg>
+
+            <!-- campaigns -->
+            <div class="table" style="left: 20px; top: 80px;">
+                <div class="table-header">campaigns</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">campaign_id (UNIQUE)</div>
+                    <div class="field">advertiser_id</div>
+                    <div class="field">campaign_name</div>
+                    <div class="field">daily_budget</div>
+                    <div class="field">total_budget</div>
+                    <div class="field">spent_today</div>
+                    <div class="field">max_bid</div>
+                    <div class="field">start_date</div>
+                    <div class="field">end_date</div>
+                    <div class="field">status</div>
+                    <div class="field">creative_id</div>
+                    <div class="field">landing_url</div>
+                </div>
+            </div>
+
+            <!-- targeting_rules -->
+            <div class="table" style="left: 650px; top: 0px;">
+                <div class="table-header">targeting_rules</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">rule_id (UNIQUE)</div>
+                    <div class="field fk">🔗 campaign_id (FK)</div>
+                    <div class="field">target_type</div>
+                    <div class="field">target_operator</div>
+                    <div class="field">target_value</div>
+                </div>
+            </div>
+
+            <!-- bid_history -->
+            <div class="table" style="left: 650px; top: 220px;">
+                <div class="table-header">bid_history</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">bid_id (UNIQUE)</div>
+                    <div class="field fk">🔗 campaign_id (FK)</div>
+                    <div class="field">auction_id</div>
+                    <div class="field">bid_amount</div>
+                    <div class="field">won</div>
+                    <div class="field">final_price</div>
+                </div>
+            </div>
+
+            <!-- budget_tracking -->
+            <div class="table" style="left: 650px; top: 470px;">
+                <div class="table-header">budget_tracking</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field fk">🔗 campaign_id (FK)</div>
+                    <div class="field">date</div>
+                    <div class="field">spent</div>
+                    <div class="field">impressions</div>
+                    <div class="field">clicks</div>
+                    <div class="field">conversions</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ADVERTISER ERD -->
+    <div class="section">
+        <div class="section-title">🎨 Advertiser Ad Server - ERD</div>
+        <div class="erd-container" style="height: 400px;">
+            <svg>
+                <!-- creatives to impressions (1:N) -->
+                <path d="M 300 150 L 650 150" class="relationship one-to-many" />
+                <text x="450" y="140" class="label">1:N</text>
+
+                <!-- impressions to clicks (1:N) -->
+                <path d="M 800 250 L 800 350" class="relationship one-to-many" />
+                <text x="810" y="295" class="label">1:N</text>
+            </svg>
+
+            <!-- creatives -->
+            <div class="table" style="left: 20px; top: 80px;">
+                <div class="table-header">creatives</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">creative_id (UNIQUE)</div>
+                    <div class="field">advertiser_id</div>
+                    <div class="field">campaign_id</div>
+                    <div class="field">creative_type</div>
+                    <div class="field">asset_url</div>
+                    <div class="field">width</div>
+                    <div class="field">height</div>
+                    <div class="field">status</div>
+                </div>
+            </div>
+
+            <!-- impressions -->
+            <div class="table" style="left: 650px; top: 80px;">
+                <div class="table-header">impressions</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">impression_id (UNIQUE)</div>
+                    <div class="field fk">🔗 creative_id (FK)</div>
+                    <div class="field">campaign_id</div>
+                    <div class="field">auction_id</div>
+                    <div class="field">user_id</div>
+                    <div class="field">timestamp</div>
+                </div>
+            </div>
+
+            <!-- clicks -->
+            <div class="table" style="left: 650px; top: 380px;">
+                <div class="table-header">clicks</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 id (PK)</div>
+                    <div class="field">click_id (UNIQUE)</div>
+                    <div class="field fk">🔗 impression_id (FK)</div>
+                    <div class="field">creative_id</div>
+                    <div class="field">landing_url</div>
+                    <div class="field">timestamp</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SCYLLADB ANALYTICS ERD -->
+    <div class="section">
+        <div class="section-title">📊 ScyllaDB Analytics Tables - ERD</div>
+        <div class="erd-container" style="height: 600px;">
+            <svg>
+                <!-- Publisher Analytics -->
+                <path d="M 250 100 L 250 200 L 100 200" class="relationship one-to-many" />
+                <text x="200" y="150" class="label">Aggregated</text>
+
+                <path d="M 250 100 L 250 350 L 100 350" class="relationship one-to-many" />
+                <text x="200" y="280" class="label">Aggregated</text>
+
+                <!-- Advertiser Analytics -->
+                <path d="M 1050 100 L 1050 200 L 900 200" class="relationship one-to-many" />
+                <text x="980" y="150" class="label">Aggregated</text>
+            </svg>
+
+            <!-- Source: auctions/impressions -->
+            <div class="table" style="left: 250px; top: 30px;">
+                <div class="table-header">Source: MySQL Events</div>
+                <div class="table-body">
+                    <div class="field">Kafka → Flink</div>
+                    <div class="field">Stream Processing</div>
+                </div>
+            </div>
+
+            <!-- Publisher: auction_metrics_hourly -->
+            <div class="table" style="left: 20px; top: 150px;">
+                <div class="table-header">auction_metrics_hourly</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 slot_id, hour (PK)</div>
+                    <div class="field">total_auctions</div>
+                    <div class="field">total_bids</div>
+                    <div class="field">avg_winning_bid</div>
+                    <div class="field">fill_rate</div>
+                </div>
+            </div>
+
+            <!-- Publisher: impression_metrics_hourly -->
+            <div class="table" style="left: 20px; top: 350px;">
+                <div class="table-header">impression_metrics_hourly</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 slot_id, hour (PK)</div>
+                    <div class="field">total_impressions</div>
+                    <div class="field">total_revenue</div>
+                    <div class="field">avg_cpm</div>
+                    <div class="field">unique_users</div>
+                </div>
+            </div>
+
+            <!-- Publisher: dsp_performance -->
+            <div class="table" style="left: 350px; top: 200px;">
+                <div class="table-header">dsp_performance</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 dsp_id, date (PK)</div>
+                    <div class="field">total_bids</div>
+                    <div class="field">total_wins</div>
+                    <div class="field">win_rate</div>
+                    <div class="field">total_spend</div>
+                </div>
+            </div>
+
+            <!-- Advertiser source -->
+            <div class="table" style="left: 1050px; top: 30px;">
+                <div class="table-header">Source: Campaign Events</div>
+                <div class="table-body">
+                    <div class="field">Kafka → Flink</div>
+                    <div class="field">Stream Processing</div>
+                </div>
+            </div>
+
+            <!-- Advertiser: campaign_metrics_hourly -->
+            <div class="table" style="left: 900px; top: 150px;">
+                <div class="table-header">campaign_metrics_hourly</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 campaign_id, hour (PK)</div>
+                    <div class="field">impressions</div>
+                    <div class="field">clicks</div>
+                    <div class="field">conversions</div>
+                    <div class="field">spend</div>
+                    <div class="field">ctr</div>
+                    <div class="field">cvr</div>
+                </div>
+            </div>
+
+            <!-- Advertiser: creative_performance -->
+            <div class="table" style="left: 900px; top: 350px;">
+                <div class="table-header">creative_performance</div>
+                <div class="table-body">
+                    <div class="field pk">🔑 creative_id, date (PK)</div>
+                    <div class="field">impressions</div>
+                    <div class="field">clicks</div>
+                    <div class="field">ctr</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

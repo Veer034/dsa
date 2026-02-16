@@ -45,8 +45,111 @@
 
 ---
 * [x] **What is the Spring Bean lifecycle?**
-    * Spring Bean lifecycle: Instantiation → Populate Properties → setBeanName() → setBeanFactory() → setApplicationContext() → @PostConstruct / afterPropertiesSet() → Bean Ready → @PreDestroy / destroy() → Bean Destroyed.
+  ```
+    Constructor
+    ↓
+    Dependency Injection
+    ↓
+    setBeanName
+    ↓
+    setBeanFactory
+    ↓
+    setApplicationContext
+    ↓
+    @PostConstruct
+    ↓
+    afterPropertiesSet
+    ↓
+    Bean Ready
+    ↓
+    @PreDestroy
+    ↓
+    destroy()
+  
+  ------------
+    @Component
+    public class OrderService implements
+    BeanNameAware,
+    BeanFactoryAware,
+    ApplicationContextAware,
+    InitializingBean,
+    DisposableBean {
 
+    private String beanName;
+
+    // 1. Instantiation
+    public OrderService() {
+        System.out.println("1. Constructor called");
+    }
+
+    // 2. Populate properties
+    @Autowired
+    public void setDependency(PaymentService ps) {
+        System.out.println("2. Properties populated");
+    }
+
+    // 3. setBeanName
+    @Override
+    public void setBeanName(String name) {
+        this.beanName = name;
+        System.out.println("3. setBeanName: " + name);
+    }
+
+    // 4. setBeanFactory
+    @Override
+    public void setBeanFactory(BeanFactory beanFactory) {
+        System.out.println("4. setBeanFactory");
+    }
+
+    // 5. setApplicationContext
+    @Override
+    public void setApplicationContext(ApplicationContext ctx) {
+        System.out.println("5. setApplicationContext");
+    }
+
+    // 6a. @PostConstruct
+    @PostConstruct
+    public void postConstruct() {
+        System.out.println("6. @PostConstruct");
+    }
+
+    // 6b. afterPropertiesSet
+    @Override
+    public void afterPropertiesSet() {
+        System.out.println("7. afterPropertiesSet");
+    }
+
+    // ---- Bean Ready ----
+
+    // 8a. @PreDestroy
+    @PreDestroy
+    public void preDestroy() {
+        System.out.println("8. @PreDestroy");
+    }
+
+    // 8b. destroy
+    @Override
+    public void destroy() {
+        System.out.println("9. destroy()");
+    }
+  }
+
+  ```
+  | Aspect                            | `BeanFactory`           | `ApplicationContext`          |
+  | --------------------------------- | ----------------------- | ----------------------------- |
+  | Purpose                           | Basic DI container      | Full application runtime      |
+  | Bean creation                     | Lazy (on demand)        | Eager by default              |
+  | Get a bean                        | ✅ Yes                   | ✅ Yes                         |
+  | Publish events                    | ❌ No                    | ✅ Yes                         |
+  | Listen to events                  | ❌ No                    | ✅ Yes                         |
+  | Environment / profiles            | ❌ No                    | ✅ Yes                         |
+  | Property resolution               | ❌ Limited               | ✅ Full (`@Value`, properties) |
+  | Resource loading (file/classpath) | ❌ No                    | ✅ Yes                         |
+  | Runtime strategy discovery        | ❌ No                    | ✅ `getBeansOfType()`          |
+  | Internationalization (i18n)       | ❌ No                    | ✅ Yes                         |
+  | AOP, scheduling support           | ❌ No                    | ✅ Yes                         |
+  | Typical usage                     | Internal framework code | Real production apps          |
+  | Should business code use it?      | Rare                    | Rare (only when needed)       |
 
 ---
 * [x] **Difference between @Autowired, @Inject, and @Resource**
@@ -159,6 +262,38 @@
   5️⃣ Retry (for transient errors)
   .retryWhen(Retry.backoff(3, Duration.ofSeconds(2)))
   ```
+----
+* [x] **Compare Webflux reactive streams vs Vert.x Eventloop?**
+
+| Aspect                 | **Spring WebFlux**                       | **Vert.x**                  |
+| ---------------------- | ---------------------------------------- | --------------------------- |
+| Core model             | Reactive Streams (Reactor `Mono/Flux`)   | Event-loop, callback/async  |
+| Threading              | Netty EL + schedulers (soft EL)          | Strict single EL per core   |
+| Context switching      | Possible (scheduler boundaries)          | None unless you offload     |
+| Blocking tolerance     | Safer (offloads blocking)                | Not allowed (fails fast)    |
+| Backpressure           | Built-in (`request(n)`)                  | Manual / queue-based        |
+| Abstraction cost       | Higher (operators, bookkeeping)          | Lower (direct handlers)     |
+| Raw performance        | Very good                                | Excellent (lower p99)       |
+| Latency predictability | Good                                     | Very high                   |
+| Memory / GC            | Higher                                   | Lower                       |
+| Ecosystem              | Full Spring (Security, Actuator, Config) | Minimal, lightweight        |
+| Dev productivity       | High (Spring style)                      | Medium (event-loop mindset) |
+| Best scale range       | Low → high                               | High → extreme              |
+| Failure mode           | Degrades gracefully                      | Fails fast                  |
+
+* [x] **Reactive streams vs Eventloop?**
+  Here are **clean, exact one-liners** (interview-perfect):
+
+  * **Event loop:**
+
+  >   *A single-threaded execution loop that handles many concurrent I/O events without blocking.*
+
+  * **Reactive stream:**
+
+  >   *A demand-driven data pipeline where consumers control how much data producers emit using backpressure.*
+
+That’s all you need.
+
 
 ### Spring Data & ORM
 
@@ -186,30 +321,30 @@
         * Fetch Join (Preferred)
             * Load parent and child in single query
             * JOIN FETCH in JPQL
-            *  ```
-         @Query("SELECT o FROM Order o JOIN FETCH o.items")
-         List<Order> findAllWithItems();
-         ```
+             ```
+               @Query("SELECT o FROM Order o JOIN FETCH o.items")
+               List<Order> findAllWithItems();
+            ```
         * EntityGraph
             * Declarative fetch plan
             * Avoids query changes
-            * ```
-        @EntityGraph(attributePaths = "items")
-        List<Order> findAll();
-         ```
+          ```
+          @EntityGraph(attributePaths = "items")
+          List<Order> findAll();
+          ```
         * DTO / Projection Query
             * Fetch only required fields
             * Best for read-only APIs
             * ```
-        SELECT new OrderDTO(o.id, i.name)
-        FROM Order o JOIN o.items i
-        ```
+              SELECT new OrderDTO(o.id, i.name)
+              FROM Order o JOIN o.items i
+              ```
         * Batch Fetching
             * Configure Hibernate batch size
             * Reduces N queries to N/batch
             * ```
-        hibernate.default_batch_fetch_size=20
-        ```
+              hibernate.default_batch_fetch_size=20
+              ```
 
 
 
@@ -225,49 +360,49 @@
         * SecurityFilterChain (15+ filters)
         * UsernamePasswordAuthenticationFilter : Intercepts login requests, extracts credentials
             * ```
-        // Captures username/password from request
-        UsernamePasswordAuthenticationToken token = new UsernamePasswordAuthenticationToken(username, password);
-        ```
+              // Captures username/password from request
+              UsernamePasswordAuthenticationToken token = new UsernamePasswordAuthenticationToken(username, password);
+              ```
         * AuthenticationManager : Delegates authentication to providers
             * ```
-        Authentication auth = authenticationManager.authenticate(token);
-        ```
+              Authentication auth = authenticationManager.authenticate(token);
+              ```
+
         * AuthenticationProvider : Does actual authentication logic
             * ```
-        @Override
-        public Authentication authenticate(Authentication auth) {
-        String username = auth.getName();
-        String password = auth.getCredentials().toString();
+            @Override
+            public Authentication authenticate(Authentication auth) {
+            String username = auth.getName();
+            String password = auth.getCredentials().toString();
   
-        UserDetails user = userDetailsService.loadUserByUsername(username);
+            UserDetails user = userDetailsService.loadUserByUsername(username);
       
-        if (passwordEncoder.matches(password, user.getPassword())) {
-            return new UsernamePasswordAuthenticationToken(
-                user, password, user.getAuthorities()
-            );
-          }
-         throw new BadCredentialsException("Invalid credentials");
-        }
-        ```
+            if (passwordEncoder.matches(password, user.getPassword())) {
+                return new UsernamePasswordAuthenticationToken(
+                    user, password, user.getAuthorities()
+                );
+              }
+             throw new BadCredentialsException("Invalid credentials");
+            }
+            ```
         * UserDetailsService : Loads user from database
             * ```
-        @Override
-        public UserDetails loadUserByUsername(String username) {
-        User user = userRepository.findByUsername(username);
-        return new org.springframework.security.core.userdetails.User(
-        user.getUsername(),
-        user.getPassword(),
-        user.getAuthorities()
-        );
-        }
-        ```
+            @Override
+            public UserDetails loadUserByUsername(String username) {
+              User user = userRepository.findByUsername(username);
+              return new org.springframework.security.core.userdetails.User(
+                user.getUsername(),
+                user.getPassword(),
+                user.getAuthorities());
+            }
+           ```
         * Your Controller
-        * Spring Security = Filter Chain → Authentication → Authorization
-            * Filters intercept requests before controllers
-            * Authentication verifies identity (username/password)
-            * Authorization checks permissions (roles/authorities)
-            * SecurityContext stores authenticated user throughout request
-            * Customizable via SecurityFilterChain configuration
+            * Spring Security = Filter Chain → Authentication → Authorization
+                * Filters intercept requests before controllers
+                * Authentication verifies identity (username/password)
+                * Authorization checks permissions (roles/authorities)
+                * SecurityContext stores authenticated user throughout request
+                * Customizable via SecurityFilterChain configuration
 ---
 * [x] **Why Custom Privileges/Scopes Instead of Spring's hasRole()?**
     * Spring's hasRole() is limited to simple role-based access (ADMIN, USER). Our application needs fine-grained
@@ -320,7 +455,7 @@
 * [x] **Explain Circuit Breaker pattern (Resilience4j, Hystrix)**
     * Circuit Breaker prevents repeated calls to a failing service by opening the circuit after failures and providing fallback until recovery.
     * Resilience4j combines Circuit Breaker for fault isolation, Rate Limiter for traffic control, and Time Limiter for latency protection, ensuring system stability under failures.
-    * ```yaml
+  ```yaml
     resilience4j:
       circuitbreaker:
         instances:
@@ -341,8 +476,8 @@
       instances:
         paymentTL:
           timeoutDuration: 2s             # timeout after 2s
-    ```
-      ```java
+  ```
+  ```java
       @Service
       public class PaymentService {
   
@@ -368,7 +503,7 @@
           return CompletableFuture.completedFuture("PAYMENT_TEMPORARILY_UNAVAILABLE");
         }
       }
-      ```
+  ```
         * What happens internally (state-wise)
             * CLOSED → calls flow normally
             * Failures/timeouts increase → threshold crossed

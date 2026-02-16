@@ -92,8 +92,8 @@
             - Great for search, less optimal for sorting/aggregations
             - Doc values (forward index) complement it for analytics
               **Interview tip**: Inverted indices make Elasticsearch fast at "find documents with this term" but requires doc values for "get all values of this field across documents."
-
-* [ ] **Describe the lifecycle of a document from indexing to search in Elasticsearch.**
+---
+* [x] **Describe the lifecycle of a document from indexing to search in Elasticsearch.**
     * **Indexing**
         1. **Routing**: Coordinator node calculates shard using `hash(doc_id) % num_primary_shards`
         2. **Primary writes**: Document → in-memory buffer + transaction log
