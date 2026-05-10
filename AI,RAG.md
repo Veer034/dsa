@@ -123,7 +123,7 @@
   I tested three architectures on the same dataset:
 
   | Model | Architecture | Parameters | Test Type Acc | Test Subtype Acc | Inference Time | Memory |
-    |-------|-------------|------------|---------------|------------------|----------------|---------|
+      |-------|-------------|------------|---------------|------------------|----------------|---------|
   | BERT-base | Encoder-only | 110M | 86.3% | 79.5% | ~25ms/email | 6GB |
   | **DeBERTa-v3-base** | Encoder-only | 183M | **91.2%** | **85.8%** | ~35ms/email | 7GB |
   | LLaMA-7B (considered) | Decoder-only | 7B | Not tested | Not tested | ~1500ms/email | 28GB+ |
@@ -888,40 +888,40 @@
 
     *
 
-      ```python
-      # RAG Pipeline Flow:
+    ```python
+    # RAG Pipeline Flow:
 
-      1. Document Ingestion (one-time):
-         - Upload PDFs, docs, FAQs to system
-         - Split into chunks (512 tokens each)
-         - Generate embeddings using sentence-transformers
-         - Store in Elasticsearch vector index
+    1. Document Ingestion (one-time):
+       - Upload PDFs, docs, FAQs to system
+       - Split into chunks (512 tokens each)
+       - Generate embeddings using sentence-transformers
+       - Store in Elasticsearch vector index
 
-      2. Query Processing (runtime):
-         email = "What's your refund policy?"
+    2. Query Processing (runtime):
+       email = "What's your refund policy?"
 
-         # Step 1: Retrieve
-         query_embedding = embed(email)
-         relevant_docs = elasticsearch.knn_search(
-             query_embedding, 
-             k=5  # Top 5 most relevant chunks
-         )
+       # Step 1: Retrieve
+       query_embedding = embed(email)
+       relevant_docs = elasticsearch.knn_search(
+           query_embedding, 
+           k=5  # Top 5 most relevant chunks
+       )
 
-         # Step 2: Generate prompt
-         context = "\n".join(relevant_docs)
-         prompt = f"""
-         Context: {context}
+       # Step 2: Generate prompt
+       context = "\n".join(relevant_docs)
+       prompt = f"""
+       Context: {context}
 
-         Customer Question: {email}
+       Customer Question: {email}
 
-         Generate professional response based only on context above.
-         """
+       Generate professional response based only on context above.
+       """
 
-         # Step 3: Generate response
-         response = mistral_api.generate(prompt)
+       # Step 3: Generate response
+       response = mistral_api.generate(prompt)
 
-         return response
-      ```
+       return response
+    ```
 
     * **Architecture:**
   ```

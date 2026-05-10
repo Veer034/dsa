@@ -38,9 +38,9 @@ public class TrappingRainWater {
     int data=0;
     for (int i = 0; i < A.length ; i++) {
       data+=Math.min(left[i],right[i])-A[i];
-      System.out.println(data);
     }
 
+    System.out.println(data);
   }
 
 

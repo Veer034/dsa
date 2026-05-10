@@ -95,6 +95,102 @@ ScyllaDB is not a relational database. Don't use it where you need JOINs, ACID t
 
 ## How ScyllaDB Works Internally
 
+
+### LSM Tree — Log Structured Merge Tree
+
+### Why not just use B+ Tree?
+
+B+ Trees (used in MySQL, PostgreSQL) are great for reads but struggle under heavy writes because:
+- Every write requires **rebalancing the tree** on disk
+- Large datasets → lots of **random disk I/O** on every write
+- Frequent inserts/deletes → **fragmentation**
+
+LSM Tree flips the approach — **optimize writes first, handle reads smartly.**
+
+---
+
+### The Core Idea
+
+> Instead of writing directly to disk on every operation, **buffer writes in memory first, then flush to disk in bulk — sequentially.**
+
+Sequential writes are dramatically faster than random writes on disk.
+
+---
+
+### Key Components
+
+**MemTable (Memory)**
+- All incoming writes go here first — it's just an in-memory sorted structure
+- Writing is O(1), extremely fast
+- Once it fills up → flushed to disk as an **SSTable**
+
+**Write-Ahead Log (WAL)**
+- Every write is also appended to a WAL file on disk simultaneously
+- Purpose: crash recovery — if app crashes before MemTable flushes, WAL replays the lost writes
+- Solves the "what if server crashes?" problem
+
+**SSTable (Sorted String Table)**
+- MemTable data flushed to disk as immutable sorted files
+- Immutable = no in-place updates, ever
+- Organized in **levels** — Level 0 has newest data, deeper levels have older compacted data
+
+---
+
+### How Each Operation Works
+
+**Write**
+```
+Write comes in
+  → written to WAL (crash safety)
+  → written to MemTable (fast, in-memory)
+  → when MemTable full → flushed as SSTable to disk
+```
+
+**Read**
+```
+Look in MemTable first
+  → not found? scan SSTables level by level (newest → oldest)
+  → SSTables are sorted → binary search within each = O(log n)
+```
+
+Problem: if you have 10 SSTables, you might scan all 10. That's expensive.
+
+Solution: **Bloom Filter** — a probabilistic structure that tells you with certainty if a key is *not* in an SSTable. Skip those SSTables entirely. Saves a lot of disk reads.
+
+**Update**
+No in-place update. Just **append a new entry** with the same key. During compaction, the latest version wins and older ones are discarded.
+
+**Delete**
+No in-place delete. Append the same key with a **tombstone marker**. During compaction, tombstoned entries are permanently discarded.
+
+---
+
+### Compaction
+
+Over time SSTables pile up. Compaction periodically **merges SSTables**, keeps only the latest version of each key, and removes tombstoned entries.
+
+```
+SSTable L0 + SSTable L1 → merged → compacted SSTable L2
+```
+
+This keeps read performance healthy and reclaims disk space.
+
+---
+
+### Summary
+
+| Operation | How LSM handles it |
+|---|---|
+| Write | MemTable → WAL → SSTable (sequential, fast) |
+| Read | MemTable → SSTables (Bloom filter skips irrelevant ones) |
+| Update | Append new version, compaction keeps latest |
+| Delete | Append tombstone, compaction discards it |
+| Crash safety | WAL replays lost writes |
+
+**Used in:** RocksDB, Cassandra, HBase, LevelDB — all write-heavy systems.
+
+---
+
 ### The Shard-per-Core Architecture
 
 > **Shard** — A shard is a slice of a node permanently bound to one CPU core. Each shard owns its own chunk of memory and its own data files on disk. No two shards share anything. When ScyllaDB starts, it creates exactly one shard per CPU core on the machine. A request is routed directly to the shard that owns the data for that partition key — that CPU core handles the entire request alone, start to finish.

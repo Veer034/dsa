@@ -10,7 +10,9 @@ import java.util.TreeMap;
 public class MeetingRoom2 {
 
   public static void main(String aa[]){
-
+    //  0   5   15
+    //  10  20  30
+    //  1    2   2
     int intervals[][] = new int[][]{{0, 30},{5, 10},{15, 20}};
       int[] starts = new int[intervals.length];
       int[] ends = new int[intervals.length];

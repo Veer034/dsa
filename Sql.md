@@ -16,14 +16,14 @@
           ON e.manager_id = m.emp_id;
 
            ```
-          * Use case: Find employees under a specific manager.
-            ```
-            SELECT e.name
-            FROM Employee e
-            JOIN Employee m
-            ON e.manager_id = m.emp_id
-            WHERE m.name = 'B';
-            ```
+            * Use case: Find employees under a specific manager.
+              ```
+              SELECT e.name
+              FROM Employee e
+              JOIN Employee m
+              ON e.manager_id = m.emp_id
+              WHERE m.name = 'B';
+              ```
 ---
 * [x] **Explain GROUP BY and HAVING clause**
     * GROUP BY aggregates rows into groups, and HAVING filters those groups based on aggregate conditions.
@@ -102,7 +102,7 @@
     * **Key Differences MySQL and Oracle Isolation:**
 
   | Aspect | MySQL (InnoDB) | Oracle |
-    |--------|---------------|---------|
+      |--------|---------------|---------|
   | **Default Level** | Repeatable Read | Read Committed |
   | **Snapshot taken** | At transaction start | At each query |
   | **Phantom reads in default** | ❌ Prevented | ✅ Possible |
@@ -339,3 +339,451 @@
     * **Horizontal Scaling (Scale-out)**
         * Horizontal scaling means adding more machines/nodes and distributing load or data across them.
         * **Use case:** large systems needing high availability and unlimited growth; complex but highly scalable.
+
+---
+
+## Advanced Topics for 11+ Years Experienced Engineers
+
+### Query Optimization & Execution Internals
+
+* [ ] **A query that was fast 6 months ago is now 10x slower. How do you diagnose and fix it without downtime?**
+    * This is a classic production scenario — data growth breaks query plans.
+    * **Step 1: Capture the problem**
+        ```sql
+        -- Enable slow query log
+        SET GLOBAL slow_query_log = 'ON';
+        SET GLOBAL long_query_time = 1;  -- log queries >1 second
+        SET GLOBAL slow_query_log_file = '/var/log/mysql/slow.log';
+
+        -- Analyze with pt-query-digest (Percona Toolkit)
+        pt-query-digest /var/log/mysql/slow.log | head -100
+        ```
+    * **Step 2: Get the execution plan**
+        ```sql
+        EXPLAIN FORMAT=JSON SELECT ...;
+        -- Or use EXPLAIN ANALYZE (MySQL 8.0+) for actual runtime stats
+        EXPLAIN ANALYZE SELECT o.id, u.name
+        FROM orders o JOIN users u ON o.user_id = u.id
+        WHERE o.status = 'pending' AND o.created_at > '2026-01-01';
+        ```
+        * **Key fields to look at:**
+            * `type`: Should be `ref` or `range`. `ALL` (full scan) = problem.
+            * `rows`: Estimated rows scanned — if this is millions, you need an index.
+            * `Extra`: `Using filesort` or `Using temporary` = expensive operations.
+    * **Step 3: Check index usage and statistics**
+        ```sql
+        SHOW INDEX FROM orders;
+
+        -- Check if statistics are stale (common cause!)
+        ANALYZE TABLE orders;  -- recalculates statistics
+
+        -- Check when stats were last updated
+        SELECT table_name, update_time FROM information_schema.tables
+        WHERE table_schema = 'your_db' AND table_name = 'orders';
+        ```
+        * **Stale statistics** are the #1 hidden cause of sudden query regressions — MySQL's optimizer uses them to choose query plans.
+    * **Step 4: Fix without downtime**
+        ```sql
+        -- Add index online (MySQL 5.6+ InnoDB)
+        ALTER TABLE orders
+        ADD INDEX idx_status_created (status, created_at),
+        ALGORITHM=INPLACE, LOCK=NONE;
+
+        -- Or use pt-online-schema-change (no lock, works on all MySQL versions)
+        pt-online-schema-change --alter "ADD INDEX idx_status_created (status, created_at)" \
+          D=mydb,t=orders --execute
+
+        -- Or gh-ost (GitHub's online DDL tool — preferred at scale)
+        gh-ost --table=orders --alter="ADD INDEX idx_status_created (status, created_at)" ...
+        ```
+    * **Force index if optimizer makes wrong choice:**
+        ```sql
+        SELECT * FROM orders FORCE INDEX (idx_status_created)
+        WHERE status = 'pending' AND created_at > '2026-01-01';
+        ```
+
+---
+
+* [ ] **Explain the difference between a nested loop join, hash join, and merge join. When does MySQL choose each?**
+    * The join algorithm chosen by the optimizer dramatically affects query performance on large tables.
+    * **Nested Loop Join (NLJ) — MySQL's primary algorithm:**
+        * For each row in the outer table, scan (or index-lookup) the inner table.
+        * **Complexity:** O(N × M) for full scan, O(N × log M) with index on inner table.
+        * **MySQL uses NLJ when:** Both tables have appropriate indexes, result sets are small-moderate.
+        ```sql
+        -- Index nested loop join (fast)
+        SELECT * FROM orders o JOIN users u ON o.user_id = u.id WHERE o.status = 'shipped';
+        -- MySQL scans filtered orders, does index lookup on users for each row
+        ```
+    * **Block Nested Loop (BNL) — when inner table has no usable index:**
+        * Loads chunks of the outer table into `join_buffer`, scans inner table once per chunk.
+        * Controlled by `join_buffer_size` (default 256KB, increase for large joins).
+        * **Optimization:** Add an index on the join column to convert BNL → NLJ.
+    * **Hash Join (MySQL 8.0.18+):**
+        * Build a hash table from the smaller table in memory, probe it with rows from the larger table.
+        * **O(N + M)** — much faster than NLJ for large tables without indexes.
+        * MySQL uses hash join when no index is available for the join condition (replaces BNL).
+        ```sql
+        -- Force hash join (MySQL 8.0+)
+        SELECT /*+ HASH_JOIN(o u) */ * FROM orders o JOIN users u ON o.user_id = u.id;
+        ```
+    * **Merge Join:** MySQL doesn't natively support merge join (MariaDB does). Simulated via sorted index scans.
+    * **Decision Framework:**
+      | Scenario | Algorithm |
+      |----------|-----------|
+      | Index on join column | Index Nested Loop |
+      | No index, small table | Hash Join (8.0+) |
+      | No index, old MySQL | Block Nested Loop |
+      | Both tables sorted on join key | Merge Join (MariaDB) |
+
+---
+
+* [ ] **How does InnoDB's MVCC work internally, and what happens to undo logs over time?**
+    * **InnoDB Row Versioning:**
+        * Every InnoDB row has two hidden columns: `DB_TRX_ID` (ID of last transaction to modify the row) and `DB_ROLL_PTR` (pointer to the undo log entry for the previous version).
+        * When a transaction modifies a row, InnoDB: writes old row data to undo log, updates the row with new data and current transaction ID, sets `DB_ROLL_PTR` to point to the undo log entry.
+    * **Read View (Snapshot):**
+        * When a transaction starts a consistent read, InnoDB creates a **Read View** containing: list of active transaction IDs at that moment, min and max transaction IDs.
+        * For each row read, InnoDB checks: if `DB_TRX_ID` is visible to the Read View → return the row. Otherwise, follow `DB_ROLL_PTR` chain through undo log until finding a visible version.
+    * **Undo Log Growth — the hidden danger:**
+        * Long-running transactions prevent undo log purging.
+        * The purge thread can only clean undo logs for transactions older than the oldest active Read View.
+        ```sql
+        -- Check undo log size
+        SHOW ENGINE INNODB STATUS\G
+        -- Look for: "History list length 50000" -- dangerous if growing
+
+        -- Find the culprit: long-running transaction
+        SELECT trx_id, trx_started, trx_query, trx_rows_locked
+        FROM information_schema.INNODB_TRX
+        ORDER BY trx_started ASC LIMIT 10;
+        ```
+    * **Production Impact of Undo Log Bloat:**
+        * Reads slow down because they must traverse longer version chains.
+        * Disk space consumed by growing undo tablespace.
+        * **Fix:** Kill long-running transactions. Set `innodb_max_undo_log_size`. Enable `innodb_undo_log_truncate`.
+    * **Recommended Settings:**
+        ```sql
+        SET GLOBAL innodb_undo_log_truncate = ON;
+        SET GLOBAL innodb_purge_rseg_truncate_frequency = 128;
+        -- Monitor
+        SELECT NAME, SUBSYSTEM, COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS
+        WHERE NAME LIKE '%undo%';
+        ```
+
+---
+
+### Large-Scale Schema Design
+
+* [ ] **How would you design a multi-tenant SaaS database schema that supports 10,000 tenants with data isolation, without separate databases per tenant?**
+    * **The Three Approaches:**
+    * **Approach 1: Shared Schema (Column-based tenancy):**
+        ```sql
+        CREATE TABLE orders (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            tenant_id INT NOT NULL,   -- ← tenancy discriminator
+            order_number VARCHAR(50),
+            amount DECIMAL(10,2),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_tenant_order (tenant_id, created_at),
+            INDEX idx_tenant_status (tenant_id, status)
+        );
+        ```
+        * All tenants share one table. Every query MUST include `tenant_id` in WHERE clause.
+        * **Risk:** Missing `tenant_id` filter = data leak across tenants.
+        * **Mitigation:** Use Row-Level Security (available in PostgreSQL natively; in MySQL via application-level enforcement or views).
+    * **Approach 2: Schema-per-tenant (MySQL databases per tenant):**
+        ```sql
+        CREATE DATABASE tenant_1234;
+        -- Each tenant gets their own set of tables
+        ```
+        * **Pros:** Strong isolation, easy backup per tenant, schema migrations can be per-tenant.
+        * **Cons:** 10,000 databases × N tables = connection pool explosion, difficult cross-tenant analytics.
+    * **Recommended Hybrid for 10K tenants:**
+        * Shared schema for small/medium tenants.
+        * Dedicated schema/database for "enterprise" tenants (SLA-based isolation).
+        * **Application-level enforcement via middleware:**
+        ```java
+        @Aspect
+        public class TenantIsolationAspect {
+            @Before("@annotation(TenantScoped)")
+            public void enforceTenantFilter(JoinPoint jp) {
+                // Automatically append `AND tenant_id = ?` to all queries
+                TenantContext.set(getCurrentTenantId());
+            }
+        }
+        ```
+    * **Indexing Strategy:**
+        * All indexes must include `tenant_id` as the leading column: `(tenant_id, user_id)`, `(tenant_id, created_at)`, `(tenant_id, status, created_at)`.
+        * Without `tenant_id` in the index, queries scan all tenants' data.
+    * **Sharding Consideration:**
+        * Shard by `tenant_id` range or hash when table exceeds ~500M rows.
+        * Use consistent hashing so adding shards doesn't require full reshuffle.
+
+---
+
+* [ ] **Design a time-series data schema in MySQL to store 1 billion+ IoT sensor readings per day with efficient range queries**
+    * **Naive approach (fails at scale):**
+        ```sql
+        CREATE TABLE sensor_readings (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            sensor_id INT, reading DECIMAL(10,4), recorded_at TIMESTAMP
+        );
+        -- At 1B rows/day: 365B rows/year. Queries become full-table scans.
+        ```
+    * **Production Schema with Partitioning:**
+        ```sql
+        CREATE TABLE sensor_readings (
+            sensor_id INT NOT NULL,
+            recorded_at DATETIME(3) NOT NULL,  -- millisecond precision
+            metric_name VARCHAR(50) NOT NULL,
+            value DOUBLE NOT NULL,
+            PRIMARY KEY (sensor_id, recorded_at, metric_name)  -- no surrogate PK
+        )
+        ENGINE=InnoDB
+        PARTITION BY RANGE (TO_DAYS(recorded_at)) (
+            PARTITION p_2026_01 VALUES LESS THAN (TO_DAYS('2026-02-01')),
+            PARTITION p_2026_02 VALUES LESS THAN (TO_DAYS('2026-03-01')),
+            PARTITION p_2026_03 VALUES LESS THAN (TO_DAYS('2026-04-01')),
+            -- ... add monthly partitions
+            PARTITION p_future VALUES LESS THAN MAXVALUE
+        );
+        ```
+    * **Why composite PK instead of AUTO_INCREMENT?**
+        * `(sensor_id, recorded_at)` as PK = data physically sorted by sensor + time in the clustered index → range queries on one sensor are sequential disk reads.
+        * AUTO_INCREMENT PK = data sorted by insertion order → sensor time-range queries cause random I/O.
+    * **Partition Pruning:**
+        * `WHERE recorded_at BETWEEN '2026-05-01' AND '2026-05-07'` → MySQL scans only the May partition.
+        * Partition management: drop old partitions instead of DELETE (instant, no row-by-row deletion).
+        ```sql
+        ALTER TABLE sensor_readings DROP PARTITION p_2025_01;  -- instant, free disk space
+        ```
+    * **Rollup Strategy for Analytics:**
+        ```sql
+        -- 1-minute aggregates table (pre-computed)
+        CREATE TABLE sensor_readings_1min (
+            sensor_id INT NOT NULL,
+            bucket_time DATETIME NOT NULL,
+            avg_value DOUBLE, min_value DOUBLE, max_value DOUBLE, count INT,
+            PRIMARY KEY (sensor_id, bucket_time)
+        );
+        -- Run a scheduled job to aggregate raw → 1min → 1hr → 1day
+        ```
+    * **Columnar Alternative:** For analytics workloads, stream data to ClickHouse or BigQuery — MySQL is not ideal as a primary store for 1B+ time-series rows at petabyte scale.
+
+---
+
+### Advanced Transactions & Concurrency
+
+* [ ] **Explain SELECT FOR UPDATE, SELECT FOR SHARE, and SKIP LOCKED — give production use cases for each**
+    * These are pessimistic locking mechanisms that coordinate concurrent access to rows.
+    * **SELECT FOR UPDATE:**
+        ```sql
+        BEGIN;
+        SELECT balance FROM accounts WHERE id = 123 FOR UPDATE;
+        -- No other transaction can read-for-update or modify this row
+        UPDATE accounts SET balance = balance - 100 WHERE id = 123;
+        COMMIT;
+        ```
+        * Acquires an **exclusive lock** — blocks other `FOR UPDATE` and `FOR SHARE` on same rows.
+        * **Use case:** Inventory deduction, financial transfers, any "check-then-update" pattern where you must prevent concurrent modification.
+    * **SELECT FOR SHARE (aka LOCK IN SHARE MODE):**
+        ```sql
+        SELECT * FROM config WHERE tenant_id = 456 FOR SHARE;
+        ```
+        * Acquires a **shared lock** — multiple transactions can hold shared locks simultaneously, but no one can get an exclusive lock (no modifications).
+        * **Use case:** Read a row and ensure it won't change during your transaction, without blocking other readers. E.g., reading a parent record before inserting dependent child records (to ensure parent still exists).
+    * **SKIP LOCKED — the job queue pattern:**
+        ```sql
+        -- Multiple workers competing for jobs without deadlocks
+        BEGIN;
+        SELECT id, payload FROM job_queue
+        WHERE status = 'pending'
+        ORDER BY priority DESC, created_at ASC
+        LIMIT 10
+        FOR UPDATE SKIP LOCKED;
+        -- SKIP LOCKED: skip rows already locked by other workers instead of waiting
+        UPDATE job_queue SET status = 'processing', worker_id = ? WHERE id IN (...);
+        COMMIT;
+        ```
+        * **Without SKIP LOCKED:** Workers queue up waiting for the same rows → serialized processing → throughput bottleneck.
+        * **With SKIP LOCKED:** Workers immediately grab unlocked rows → parallel processing → linear throughput scaling.
+        * **Production use:** Exactly-once job processing, outbox pattern, batch reservation systems.
+    * **NOWAIT variant:**
+        ```sql
+        SELECT * FROM orders WHERE id = 789 FOR UPDATE NOWAIT;
+        -- Immediately returns error if row is locked (instead of waiting)
+        -- Use when you want to fail fast rather than queue up
+        ```
+
+---
+
+* [ ] **How do you handle database-level optimistic locking vs pessimistic locking? When does each break down in production?**
+    * **Pessimistic Locking:**
+        * Lock the row before reading it (`SELECT FOR UPDATE`). Guarantees no concurrent modification.
+        * **Breaks down when:**
+            * Long-running transactions hold locks for seconds → other transactions pile up → connection exhaustion.
+            * Deadlocks from inconsistent lock ordering.
+            * Lock timeout errors under high concurrency.
+        * **Use for:** Short transactions, financial operations, inventory where correctness > throughput.
+    * **Optimistic Locking:**
+        * Read without locking. Before writing, verify no one else changed the row since your read.
+        ```sql
+        -- Schema: add version column
+        ALTER TABLE products ADD COLUMN version INT DEFAULT 0;
+
+        -- Read (no lock)
+        SELECT price, stock, version FROM products WHERE id = 123;
+        -- Returns: price=100, stock=50, version=7
+
+        -- Update with version check
+        UPDATE products
+        SET price = 110, stock = 49, version = version + 1
+        WHERE id = 123 AND version = 7;  -- ← optimistic check
+
+        -- If affected_rows == 0: someone else modified it → retry
+        ```
+    * **Breaks down when:**
+        * High contention on same rows → many retries → "thrash" where transactions keep failing.
+        * Under very high concurrency, retry storms can amplify load on the DB.
+    * **Hybrid Approach for Production:**
+        * Use optimistic for low-contention updates (product catalog, user profile).
+        * Use pessimistic for high-contention resources (inventory stock decrement, seat booking).
+        * Add exponential backoff on optimistic lock failures:
+        ```python
+        def update_with_retry(product_id, new_price, max_retries=3):
+            for attempt in range(max_retries):
+                rows_updated = db.execute(
+                    "UPDATE products SET price=?, version=version+1 WHERE id=? AND version=?",
+                    [new_price, product_id, current_version]
+                ).rowcount
+                if rows_updated == 1:
+                    return True
+                time.sleep(0.1 * (2 ** attempt) + random.uniform(0, 0.05))
+            raise OptimisticLockException("Exceeded retries")
+        ```
+
+---
+
+### Production Scaling Patterns
+
+* [ ] **How would you shard a MySQL database for a social media platform with 500M users? Walk through the shard key selection and the challenges you'll face**
+    * **Shard Key Selection — the most critical decision:**
+        * **Option A: user_id (recommended for social)**
+            * All user data (profile, posts, followers) for a user lives on one shard.
+            * `shard_id = user_id % num_shards`
+            * **Pro:** Single-shard lookups for most user operations.
+            * **Con:** Cross-shard queries for "global trending" or "mutual friends."
+        * **Option B: geography**
+            * Users from India on Asia shards, users from US on US shards.
+            * **Pro:** Low latency for region-local users.
+            * **Con:** Cross-region social graphs require cross-shard joins.
+    * **Data Model per Shard:**
+        ```
+        Shard 0 (user_id % 8 == 0): users, posts, comments, follows
+        Shard 1 (user_id % 8 == 1): same schema
+        ...
+        ```
+    * **Challenges and Mitigations:**
+        * **1. Cross-shard JOIN queries (e.g., "posts by users I follow"):**
+            * You cannot JOIN across shards.
+            * **Solution:** Denormalize — maintain a `user_feed` table on each user's shard with precomputed data from followees (fan-out on write).
+        * **2. Global unique IDs across shards:**
+            * AUTO_INCREMENT creates duplicate IDs across shards.
+            * **Solution:** Use distributed ID generation — Twitter Snowflake format: `timestamp(41 bits) + datacenter(5) + machine(5) + sequence(12)` = globally unique 64-bit ID.
+        * **3. Hotspot shards ("celebrity problem"):**
+            * A user with 100M followers generates massive write load on their shard.
+            * **Solution:** Store celebrity writes to a dedicated "hot shard." Fan-out asynchronously via message queue (Kafka).
+        * **4. Rebalancing when adding shards:**
+            * Going from 8 → 16 shards requires rehashing: `user_id % 16` sends half the users to new shards.
+            * **Solution:** Use consistent hashing — only 1/N of data moves when adding 1 shard. Tools: Vitess (YouTube), ProxySQL.
+        * **5. Schema migrations across 8+ shards:**
+            * Running `ALTER TABLE` on 8 shards sequentially takes hours.
+            * **Solution:** Automate with Vitess's VSchema migrations or custom migration tooling. Always use online DDL (`gh-ost`).
+
+---
+
+* [ ] **Explain the CQRS pattern with event sourcing at the database level — how does it interact with MySQL in production?**
+    * **CQRS (Command Query Responsibility Segregation):**
+        * Separate your write path (Commands) from your read path (Queries) using different data models.
+    * **Write Side (Command Model):**
+        ```sql
+        -- Normalized, append-only event store in MySQL
+        CREATE TABLE domain_events (
+            id BIGINT PRIMARY KEY AUTO_INCREMENT,
+            aggregate_id VARCHAR(36) NOT NULL,  -- e.g., order_id
+            aggregate_type VARCHAR(50) NOT NULL,
+            event_type VARCHAR(100) NOT NULL,
+            event_data JSON NOT NULL,
+            event_version INT NOT NULL,
+            occurred_at TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3),
+            INDEX idx_aggregate (aggregate_type, aggregate_id, event_version)
+        );
+        ```
+        * Every state change is stored as an immutable event. Current state = replay all events for an aggregate.
+    * **Read Side (Query Model — denormalized projections):**
+        ```sql
+        -- Read-optimized view, rebuilt from events
+        CREATE TABLE order_summary_view (
+            order_id VARCHAR(36) PRIMARY KEY,
+            user_id INT, user_name VARCHAR(100),
+            status VARCHAR(50), total_amount DECIMAL(10,2),
+            item_count INT, last_updated TIMESTAMP,
+            INDEX idx_user_status (user_id, status)
+        );
+        ```
+        * Projections are updated asynchronously by consuming domain events.
+    * **Event Projection Pipeline:**
+        ```
+        MySQL (events table) → CDC (Debezium/binlog) → Kafka → Projection Service → MySQL (read views) / Redis / Elasticsearch
+        ```
+    * **Why MySQL for the event store?**
+        * ACID guarantees for event append.
+        * Optimistic locking via `event_version`: append `version=N+1` only if `version=N` exists → prevents concurrent conflicting events.
+        ```sql
+        INSERT INTO domain_events (aggregate_id, aggregate_type, event_type, event_data, event_version)
+        SELECT 'order-123', 'Order', 'OrderShipped', '{"tracking":"XYZ"}', MAX(event_version) + 1
+        FROM domain_events WHERE aggregate_id = 'order-123';
+        -- Unique constraint on (aggregate_id, event_version) prevents duplicate versions
+        ```
+    * **Trade-offs:**
+        * **Pro:** Audit trail, temporal queries ("what was the order state at 3 PM?"), replay to rebuild projections.
+        * **Con:** Read latency (eventual consistency), complex operational model, event schema evolution is hard.
+
+---
+
+* [ ] **How do you implement zero-downtime blue-green deployments when your schema migration requires a column rename or data backfill on a 500M row table?**
+    * Column renames are the most dangerous migrations — no online DDL tool supports them directly without tricks.
+    * **The Expand-Contract Pattern (the only safe approach):**
+    * **Phase 1 — Expand (backward compatible):**
+        ```sql
+        -- Add NEW column alongside old
+        ALTER TABLE users ADD COLUMN full_name VARCHAR(200),
+        ALGORITHM=INPLACE, LOCK=NONE;  -- online, no lock
+        ```
+        * Deploy app code that writes to BOTH `name` (old) and `full_name` (new) on every insert/update.
+        * App reads from `name` still (old column is source of truth).
+    * **Phase 2 — Backfill (online, batched):**
+        ```sql
+        -- Backfill in batches to avoid locking
+        UPDATE users SET full_name = name
+        WHERE id BETWEEN 1 AND 100000 AND full_name IS NULL;
+        -- Repeat with id ranges, sleeping between batches
+        ```
+        * Use pt-online-schema-change or custom scripts with sleep intervals.
+        * Monitor replication lag — if replica lag grows, slow down batch rate.
+    * **Phase 3 — Switch reads to new column:**
+        * Deploy app code that reads from `full_name` (new column is source of truth).
+        * Still writes to both columns.
+    * **Phase 4 — Contract (remove old column):**
+        * Verify no queries reference `name` column.
+        * Deploy app code that only writes to `full_name`.
+        ```sql
+        ALTER TABLE users DROP COLUMN name,
+        ALGORITHM=INPLACE, LOCK=NONE;
+        ```
+    * **Rollback Plan:** At each phase, you can roll back to the previous app version without data loss — because both columns always have valid data during the transition.
+    * **Tooling:**
+        * `gh-ost`: Hooks for pausing, throttling based on replication lag, dry-run mode.
+        * `pt-osc`: Simpler but uses triggers (adds write overhead).
+        * Both support `--max-load` flag to auto-pause if DB load exceeds threshold.

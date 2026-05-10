@@ -440,170 +440,166 @@ When discussing AdTech flow, emphasize:
 
 ✅ **"Post-cookie, we're moving to contextual + first-party data..."**
 - Shows you're current with industry
+# AdTech Platform – Pod Sizing & HPA Configuration
 
----
-Below is a **practical, interview-safe pod sizing** for a **Zee-scale AdTech platform**, assuming **all services are Spring Boot**, **stateless**, autoscaled on CPU + QPS.
-
-I’ll base this on the **numbers we agreed**:
-
-* **Peak total QPS**: ~700–800K
-* **Peak ad-decision QPS**: ~200–300K
+> **Revised for 5 Million Transactions Per Minute (TPM)**
 
 ---
 
-## Key assumptions (say this if asked)
+## Traffic Baseline
 
-* Pod: **2 vCPU / 4–6 GB RAM**
-* Spring Boot + Netty / Undertow
-* Avg processing time:
+| Metric | Value |
+|---|---|
+| **Total Platform TPM** | 5,000,000 |
+| **Total QPS** | ~83,333 (5M ÷ 60) |
+| **Peak QPS (1.5× headroom)** | ~125,000 |
 
-  * Ad decision: 10–20 ms
-  * Tracking endpoints: 1–3 ms
-* HPA target: ~60–70% CPU
-* Numbers are **per region**
+All pod counts are calculated for **peak QPS** with HPA target at **60–70% CPU / QPS**.
 
 ---
 
-## Core AdTech services – pod count
+## Traffic Distribution Across Services
 
-### 1️⃣ Ad Decision Service (most expensive)
+The 5M TPM is split across services based on real-world AdTech traffic patterns:
 
-| Metric            | Value                                |
-| ----------------- | ------------------------------------ |
-| Peak QPS          | 200K – 300K                          |
-| QPS per pod       | 1.5K – 2K                            |
-| **Pods required** | **120 – 180**                        |
-| Why               | Business logic, cache, budget checks |
+| Service | % of Traffic | TPM | Peak QPS |
+|---|---|---|---|
+| **Ad Decision (Ad Server)** | 30% | 1,500,000 | ~37,500 |
+| **Impression Tracking** | 28% | 1,400,000 | ~35,000 |
+| **Analytics / Event Ingest** | 20% | 1,000,000 | ~25,000 |
+| **Fraud / Validation** | 10% | 500,000 | ~12,500 |
+| **Click Tracking** | 6% | 300,000 | ~7,500 |
+| **Conversion / Postback** | 3% | 150,000 | ~3,750 |
+| **Campaign / Metadata API** | 2% | 100,000 | ~2,500 |
+| **Reporting / Dashboard** | 1% | 50,000 | ~1,250 |
+| **Total** | **100%** | **5,000,000** | **~125,000** |
 
-> This is the **hardest service to scale**
+> **Why this split?** Ad decisions trigger impressions (1:1 ratio roughly). Clicks are ~10% of impressions. Conversions are ~2–3% of clicks. Analytics captures all events. Fraud checks run on a subset.
+
+---
+
+## Key Assumptions
+
+- Pod size: **2 vCPU / 4–6 GB RAM**, Spring Boot + Netty/Undertow
+- HPA target: **60–70% CPU**, or QPS-based
+- Numbers are **per region** (peak load)
+- Avg processing time: Ad Decision 10–20 ms | Tracking 1–3 ms
+
+---
+
+## Core AdTech Services – Pod Count
+
+### 1️⃣ Ad Decision Service (Ad Server)
+
+| Metric | Value |
+|---|---|
+| Peak QPS | ~37,500 |
+| QPS per pod | 1,200 – 1,500 |
+| **Pods required** | **25 – 32** |
+| Why | Business logic, ML scoring, budget checks, cache lookups |
+
+> Most compute-intensive service despite lower pod count vs original — because QPS is calibrated to 5M TPM.
 
 ---
 
 ### 2️⃣ Impression Tracking Service
 
-| Metric            | Value                             |
-| ----------------- | --------------------------------- |
-| Peak QPS          | 150K – 200K                       |
-| QPS per pod       | 5K – 8K                           |
-| **Pods required** | **25 – 40**                       |
-| Why               | Write-only, async fire-and-forget |
+| Metric | Value |
+|---|---|
+| Peak QPS | ~35,000 |
+| QPS per pod | 5,000 – 7,000 |
+| **Pods required** | **5 – 7** |
+| Why | Write-only, async fire-and-forget to Kafka |
 
 ---
 
-### 3️⃣ Click Tracking Service
+### 3️⃣ Analytics / Event Ingestion Service
 
-| Metric            | Value                     |
-| ----------------- | ------------------------- |
-| Peak QPS          | 10K – 25K                 |
-| QPS per pod       | 4K – 6K                   |
-| **Pods required** | **4 – 6**                 |
-| Why               | Low volume, simple writes |
-
----
-
-### 4️⃣ Conversion / Postback Service
-
-| Metric            | Value                                |
-| ----------------- | ------------------------------------ |
-| Peak QPS          | 2K – 5K                              |
-| QPS per pod       | 2K                                   |
-| **Pods required** | **2 – 3**                            |
-| Why               | External callbacks, latency-tolerant |
+| Metric | Value |
+|---|---|
+| Peak QPS | ~25,000 |
+| QPS per pod | 6,000 – 8,000 |
+| **Pods required** | **4 – 5** |
+| Why | Kafka producer, lightweight aggregation |
 
 ---
 
-### 5️⃣ Analytics / Event Ingestion Service
+### 4️⃣ Fraud / Validation Service
 
-| Metric            | Value                         |
-| ----------------- | ----------------------------- |
-| Peak QPS          | 100K – 150K                   |
-| QPS per pod       | 6K – 10K                      |
-| **Pods required** | **15 – 25**                   |
-| Why               | Kafka producer, minimal logic |
-
----
-
-## Supporting AdTech services
-
-### 6️⃣ Campaign / Metadata API
-
-| Metric   | Value               |
-| -------- | ------------------- |
-| QPS      | <5K                 |
-| **Pods** | **3 – 5**           |
-| Why      | Admin + cache-heavy |
+| Metric | Value |
+|---|---|
+| Peak QPS | ~12,500 |
+| QPS per pod | 2,000 – 2,500 |
+| **Pods required** | **5 – 7** |
+| Why | CPU-heavy rule evaluation, IP reputation checks |
 
 ---
 
-### 7️⃣ Fraud / Validation Service
+### 5️⃣ Click Tracking Service
 
-| Metric      | Value           |
-| ----------- | --------------- |
-| QPS         | 30K – 60K       |
-| QPS per pod | 2K – 3K         |
-| **Pods**    | **15 – 20**     |
-| Why         | CPU-heavy rules |
+| Metric | Value |
+|---|---|
+| Peak QPS | ~7,500 |
+| QPS per pod | 4,000 – 5,000 |
+| **Pods required** | **2 – 3** |
+| Why | Simple async writes, Redis dedup check |
+
+---
+
+### 6️⃣ Conversion / Postback Service
+
+| Metric | Value |
+|---|---|
+| Peak QPS | ~3,750 |
+| QPS per pod | 1,500 – 2,000 |
+| **Pods required** | **2 – 3** |
+| Why | External HTTP callbacks to advertisers, latency-tolerant |
+
+---
+
+## Supporting Services
+
+### 7️⃣ Campaign / Metadata API
+
+| Metric | Value |
+|---|---|
+| Peak QPS | ~2,500 |
+| QPS per pod | 1,000 – 1,500 |
+| **Pods required** | **2 – 3** |
+| Why | Admin CRUD, heavy cache (Redis), low write frequency |
 
 ---
 
 ### 8️⃣ Reporting / Dashboard Backend
 
-| Metric   | Value                   |
-| -------- | ----------------------- |
-| QPS      | <2K                     |
-| **Pods** | **3 – 4**               |
-| Why      | Reads from Redis / OLAP |
+| Metric | Value |
+|---|---|
+| Peak QPS | ~1,250 |
+| QPS per pod | 500 – 800 |
+| **Pods required** | **2 – 3** |
+| Why | Complex aggregations from OLAP/ClickHouse |
 
 ---
 
-## 🔢 Summary table (what interviewers like)
+## 🔢 Summary Table
 
-| Service             | Pods (Peak)                  |
-| ------------------- | ---------------------------- |
-| **Ad Decision**     | **120 – 180**                |
-| Impression Tracking | 25 – 40                      |
-| Click Tracking      | 4 – 6                        |
-| Conversion          | 2 – 3                        |
-| Analytics Ingest    | 15 – 25                      |
-| Fraud / Validation  | 15 – 20                      |
-| Campaign / Metadata | 3 – 5                        |
-| Reporting API       | 3 – 4                        |
-| **Total**           | **~190 – 280 pods / region** |
-
----
-
-## Important clarification (very senior signal)
-
-* These are **peak numbers**
-* Normal traffic runs at **40–60% of this**
-* Autoscaling absorbs bursts
-* No single service handles “all QPS”
+| Service | % Traffic | Peak QPS | QPS/Pod | Pods (Peak) |
+|---|---|---|---|---|
+| **Ad Decision** | 30% | 37,500 | 1,200–1,500 | **25–32** |
+| Impression Tracking | 28% | 35,000 | 5,000–7,000 | **5–7** |
+| Analytics Ingest | 20% | 25,000 | 6,000–8,000 | **4–5** |
+| Fraud / Validation | 10% | 12,500 | 2,000–2,500 | **5–7** |
+| Click Tracking | 6% | 7,500 | 4,000–5,000 | **2–3** |
+| Conversion / Postback | 3% | 3,750 | 1,500–2,000 | **2–3** |
+| Campaign / Metadata | 2% | 2,500 | 1,000–1,500 | **2–3** |
+| Reporting API | 1% | 1,250 | 500–800 | **2–3** |
+| **Total** | **100%** | **~125,000** | — | **~47–63 pods/region** |
 
 ---
 
-## Interview-ready one-liner
+## HPA Configurations
 
-> “At peak, a Zee-scale AdTech stack runs a few hundred Spring Boot pods per region, with the Ad Decision service dominating pod count due to strict latency and complex logic.”
-
-Below is a **clear, production-style explanation** of **HPA rules using CPU vs QPS**, with **exact YAML examples** and **when to use which**.
-
----
-
-## 1️⃣ CPU-based HPA (default, simple, reliable)
-
-### When to use
-
-* Spring Boot services
-* CPU-bound or mixed workload
-* You don’t want custom metrics infra
-
-### How it works
-
-HPA scales pods based on **average CPU utilization**.
-
----
-
-### Example: CPU-based HPA (Ad Decision)
+### 1. Ad Decision – CPU + QPS Combined (Recommended)
 
 ```yaml
 apiVersion: autoscaling/v2
@@ -615,100 +611,8 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: ad-decision
-  minReplicas: 20
-  maxReplicas: 200
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 65
-```
-
-### Meaning
-
-* If avg CPU > **65%** → scale out
-* If avg CPU < **65%** → scale in
-* Simple, stable, widely used
-
----
-
-### Pros / Cons
-
-| Pros           | Cons                   |
-| -------------- | ---------------------- |
-| Easy to set    | Reacts after CPU rises |
-| No extra infra | Not traffic-aware      |
-| Stable         | Slower for bursts      |
-
----
-
-## 2️⃣ QPS-based HPA (best for AdTech)
-
-### When to use
-
-* Traffic spikes (live events)
-* IO-heavy services
-* Ad decision / tracking endpoints
-
-### Requirement
-
-* Expose **QPS metric** (Prometheus / custom metrics API)
-
----
-
-### Example: QPS-based HPA
-
-Assume:
-
-* One pod can safely handle **1500 QPS**
-
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: ad-decision-hpa
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: ad-decision
-  minReplicas: 20
-  maxReplicas: 250
-  metrics:
-  - type: Pods
-    pods:
-      metric:
-        name: http_requests_per_second
-      target:
-        type: AverageValue
-        averageValue: "1500"
-```
-
-### Meaning
-
-* If avg QPS per pod > **1500** → scale out
-* Scales **before CPU saturates**
-
----
-
-## 3️⃣ Combined CPU + QPS (recommended)
-
-This is **best practice** for AdTech.
-
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: ad-decision-hpa
-spec:
-  minReplicas: 20
-  maxReplicas: 250
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: ad-decision
+  minReplicas: 10
+  maxReplicas: 50
   metrics:
   - type: Resource
     resource:
@@ -722,60 +626,226 @@ spec:
         name: http_requests_per_second
       target:
         type: AverageValue
-        averageValue: "1500"
+        averageValue: "1200"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+      - type: Pods
+        value: 5
+        periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 120
 ```
 
-### Behavior
+---
 
-* Scale if **either** CPU or QPS breaches
-* Protects against:
+### 2. Impression Tracking – QPS-Based
 
-  * CPU saturation
-  * IO wait spikes
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: impression-tracking-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: impression-tracking
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: "5000"
+```
 
 ---
 
-## 4️⃣ Why QPS beats CPU for Ad Decision
+### 3. Analytics Ingest – QPS-Based
 
-| Scenario              | CPU HPA | QPS HPA    |
-| --------------------- | ------- | ---------- |
-| SSAI burst            | ❌ late  | ✅ early    |
-| IO wait spike         | ❌ blind | ✅ accurate |
-| Low CPU, high latency | ❌       | ✅          |
-| Predictable scaling   | ⚠️      | ✅          |
-
-That’s why **AdTech teams prefer QPS-based HPA**.
-
----
-
-## 5️⃣ Practical numbers (use these)
-
-| Service             | Metric | Target           |
-| ------------------- | ------ | ---------------- |
-| Ad Decision         | QPS    | 1200–1500 / pod  |
-| Impression tracking | QPS    | 6000–8000 / pod  |
-| Analytics ingest    | QPS    | 8000–10000 / pod |
-| Fraud service       | CPU    | 60%              |
-
----
-
-## 6️⃣ Interview-ready explanation (use this)
-
-> “We primarily scale ad-decision services on **QPS per pod**, with CPU as a safety net. CPU alone reacts too late for bursty traffic, while QPS gives us proactive scaling during live or synchronized events.”
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: analytics-ingest-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: analytics-ingest
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: "6000"
+```
 
 ---
 
-## One-line takeaway
+### 4. Fraud / Validation – CPU-Based (Compute-Heavy)
 
-> **CPU keeps pods healthy; QPS keeps latency stable.**
-
-If you want, I can also show:
-
-* **Prometheus metric wiring**
-* **HPA stabilization windows**
-* **Pre-scale strategies for live events**
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fraud-validation-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fraud-validation
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+```
 
 ---
+
+### 5. Click Tracking – QPS-Based
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: click-tracking-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: click-tracking
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: "4000"
+```
+
+---
+
+### 6. Conversion / Postback – CPU-Based (IO-Tolerant)
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: conversion-postback-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: conversion-postback
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+```
+
+---
+
+### 7. Campaign / Metadata API – CPU-Based
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: campaign-metadata-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: campaign-metadata
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 65
+```
+
+---
+
+### 8. Reporting / Dashboard – CPU-Based
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: reporting-dashboard-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: reporting-dashboard
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 65
+```
+
+---
+
+## HPA Strategy by Service Type
+
+| Service | Metric | Target | Reason |
+|---|---|---|---|
+| Ad Decision | QPS + CPU | 1,200/pod + 65% | Bursty, latency-sensitive |
+| Impression Tracking | QPS | 5,000/pod | IO-bound, async |
+| Analytics Ingest | QPS | 6,000/pod | Kafka producer, lightweight |
+| Fraud / Validation | CPU | 60% | Rule engine is CPU-heavy |
+| Click Tracking | QPS | 4,000/pod | Traffic spikes, IO-bound |
+| Conversion / Postback | CPU | 70% | Low volume, latency-tolerant |
+| Campaign / Metadata | CPU | 65% | Cache-heavy, low traffic |
+| Reporting API | CPU | 65% | OLAP reads, low concurrency |
+
+---
+
+## Important Notes (Interview Signal)
+
+- Pod counts above are **peak numbers** — normal load runs at 40–60% of this
+- **Autoscaling absorbs bursts** — minReplicas keep baseline warm
+- **5M TPM = ~83K avg QPS = ~125K peak QPS** with 1.5× safety headroom
+- Ad Decision dominates compute cost despite ~30% traffic share due to complex logic
+- Tracking/ingest services handle high QPS efficiently via async Kafka writes
+
+---
+
+## Interview-Ready One-Liner
+
+> "At 5 million transactions per minute, our AdTech stack runs roughly 50–65 Spring Boot pods per region at peak, with Ad Decision taking the bulk of pods due to ML scoring and budget checks, while high-QPS tracking services stay lean thanks to async Kafka writes and minimal business logic."
 
 **Key Differences: Ad Server, SSP, DSP**
 
