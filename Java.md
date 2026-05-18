@@ -2004,15 +2004,42 @@ try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
     * **Observer** — subject notifies multiple observers when its state changes. Used in event systems, reactive streams, Spring's `ApplicationEvent`.
     ```java
     // Decoupled post-order processing — order service doesn't know about inventory, email, analytics
+    // placeOrder()
+    //         └─ publishEvent()
+    //                 └─ onOrderPlaced()
+    // If the listener throws an exception, it propagates to the caller.
     @Component
     public class OrderPlacedEventHandler {
+        // By default, listeners execute in the same thread:
+         
         @EventListener
         public void onOrderPlaced(OrderPlacedEvent event) {
             inventoryService.reserve(event.getItems());
             emailService.sendConfirmation(event.getCustomerId());
             analyticsService.record(event);
         }
+  
+       @Async   // Spring executes it on a separate thread.
+       @EventListener
+       public void onOrderPlaced(OrderPlacedEvent event) {
+       
+       }
     }
+  
+    @Service
+    public class OrderService {
+
+      @Autowired
+      private ApplicationEventPublisher publisher;
+
+      public void placeOrder(Order order) {
+        // Save order to DB
+        orderRepository.save(order);
+
+        // Publish event
+        publisher.publishEvent(new OrderPlacedEvent(order));
+      }
+  }
     ```
     * **Factory** — delegates object creation to a factory method or class, hiding the concrete type. Use when the exact type to instantiate depends on runtime conditions.
     ```java

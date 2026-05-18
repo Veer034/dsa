@@ -31,8 +31,6 @@
 
 ![Image](https://developers.redhat.com/sites/default/files/RHOSAK%20LP1%20Fig4.png)
 
-![Image](https://www.researchgate.net/profile/Ana-Filipa-Nogueira/publication/354426180/figure/fig2/AS%3A1065575086317568%401631064306446/Producers-and-consumers-in-a-Kafka-framework-Extracted-from-https-de-confl-uent.png)
-
 
 
 * **Broker:**  A Kafka server that **stores data and serves reads/writes**. A cluster has multiple brokers for
@@ -162,7 +160,66 @@
             * **Migrated to KRaft mode:** Raft-based controller election takes < 1 second. No ZooKeeper session expiry involved. Partition metadata is in the Raft log — no bulk re-read.
         * **KRaft failover timing:** Raft election requires a quorum vote among controller nodes. With 3 controller nodes, election completes in 1-2 RTTs — typically under 500ms. The new controller already has all metadata in its local Raft log, so no partition-by-partition re-read.
         * **Monitoring signal:** Alert on `ActiveControllerCount=0` — this means no controller exists and your cluster is in a degraded state where no partition leader elections can happen.
+    ```
+    ZooKeeper Tree
+    /
+    ├── brokers/
+    │   └── ids/
+    │       ├── 1        ← znode, stores broker 1 info
+    │       ├── 2        ← znode, stores broker 2 info
+    │       └── 3        ← znode, stores broker 3 info
+    ├── controller         ← znode, stores who current controller is
+    └── topics/
+    └── my-topic/
+    └── partitions/
+    └── 0/
+    └── state    ← znode, stores leader info for partition 0
+  ```
 
+<img src="./img/kafka_controller_failover_comparison.svg" width="800" alt="My diagram"/>
+
+```
+    New controller elected
+    │
+    ▼
+    "What partitions exist? Who leads them?
+    Who is in their ISR? I have no idea."
+    │
+    ▼
+    Only one place to ask → ZooKeeper
+    │
+    ▼
+    Read /topics/.../partitions/0/state
+    Read /topics/.../partitions/1/state
+    Read /topics/.../partitions/2/state
+    ... × 800 times one after another
+    
+    # Why Send LeaderAndIsr to All Brokers After That?
+    Old controller dies
+        │
+        ▼
+    Brokers are in limbo
+    - "Am I still the leader of partition 5?"
+    - "Is my ISR list still valid?"
+    - "Should I accept producer writes right now?"
+            │
+            ▼
+    Brokers start rejecting requests with
+    NotLeaderForPartitionException
+    because they cannot confirm authority
+    without a live controller
+   ```
+
+* An **ephemeral znode** in Apache ZooKeeper is a temporary data node that exists only as long as the client session that created it remains active.
+Here are the key things to notice across both columns:
+
+**ZooKeeper mode** — the failure cascades through three separate systems. The JVM pauses, ZooKeeper times out, brokers race, then the new controller has to do sequential znode reads. Each of those is a separate hop with its own latency, and the reads scale linearly with partition count. 800 partitions meant ~800 individual ZooKeeper calls.
+
+**KRaft mode** — the failure never leaves the controller quorum. The Raft log is already replicated on every controller node, so the winner just picks up where the old one left off. There are no external reads at all.
+
+The config callouts at the bottom of each column show the levers you actually tune:
+- In ZK mode, raising `zookeeper.session.timeout.ms` to 18–30 seconds prevents false failovers from short GC pauses, which was the root cause in the war story
+- In KRaft mode, `controller.quorum.election.timeout.ms` controls how quickly the quorum detects a dead leader — it's already in milliseconds by default, not seconds
 ---
 
 * [x] **Why Kafka was developed, when already had TIBCO,RabbitMQ?**
@@ -243,6 +300,8 @@
         }
         // else: silently skip duplicate
         ```
+Here's the modified section with your follow-up question added inline:
+
 
 ---
 * [x] **What is producer batching and compression?**
@@ -255,23 +314,32 @@
         * **Root cause — batch accumulation under bursty traffic:** `linger.ms=20` means the producer waits up to 20ms to fill a batch before sending. Under bursty traffic, when messages arrive in bursts followed by quiet periods, every batch accumulates for the full 20ms even when it could have been sent earlier with just 3-4 messages.
         * **Compound issue — `buffer.memory` exhaustion:** When downstream brokers were slow (GC pause), send buffers filled up. With `linger.ms=20`, batches accumulate longer, filling `buffer.memory` faster. Once full, the producer blocks for `max.block.ms` (default 60s) before throwing `TimeoutException`.
         * **The right tuning approach:**
-        ```properties
+   ```properties
         # Start conservative
         linger.ms=5                  # not 0 (wastes batching), not too high
         batch.size=65536             # 64KB per batch — tune based on message size
         compression.type=lz4         # fastest compression, ~2x ratio
         buffer.memory=67108864       # 64MB — increase for high-throughput producers
         max.block.ms=5000            # fail fast instead of blocking 60s
-        ```
-        * **Rule of thumb:** `linger.ms` should be <= your acceptable p99 latency budget minus broker processing time. For payment APIs: `linger.ms=0` (latency matters more than throughput). For event pipelines: `linger.ms=5-20` is fine.
-        * **Compression choice by use case:**
-            * `lz4` — best for high-throughput, CPU-sensitive producers (lowest CPU overhead)
-            * `zstd` — best compression ratio for archival topics (reduces storage costs)
-            * `snappy` — good middle ground, widely supported
-            * `gzip` — avoid for real-time; highest CPU, slowest compression
+   ```
+    * **Rule of thumb:** `linger.ms` should be <= your acceptable p99 latency budget minus broker processing time. For payment APIs: `linger.ms=0` (latency matters more than throughput). For event pipelines: `linger.ms=5-20` is fine.
+    * **Compression choice by use case:**
+        * `lz4` — best for high-throughput, CPU-sensitive producers (lowest CPU overhead)
+        * `zstd` — best compression ratio for archival topics (reduces storage costs)
+        * `snappy` — good middle ground, widely supported
+        * `gzip` — avoid for real-time; highest CPU, slowest compression
 
+    * **Follow-up: If `batch.size` and `linger.ms` are already configured, why does the producer still block for 60s?**
+        * **`batch.size`/`linger.ms` and `buffer.memory` solve different problems:**
+            * `batch.size` + `linger.ms` = controls *when* a batch is ready to send
+            * `buffer.memory` = the actual RAM pool where ALL pending batches sit waiting for the network thread to flush them to the broker
+        * **The block happens at memory allocation, not at batching.** When your app calls `producer.send()`, Kafka first tries to allocate space in `buffer.memory` for the new message. If `buffer.memory` is full (broker is slow, network thread is backed up), this allocation **blocks** — your app thread freezes here, before any batching even happens.
+        * **Why 60s?** `max.block.ms` defaults to 60,000ms. Kafka assumes the broker might recover soon and waits. Meanwhile your app thread is frozen.
+        * **The chain:** Broker slow → network thread can't drain buffer → `buffer.memory` fills up → `producer.send()` blocks on next message → your app hangs for up to 60s → `TimeoutException`
+        * **Fix:** `max.block.ms=5000` (fail fast in 5s) + increase `buffer.memory` so it takes longer to fill up
 
 ---
+
 * [x] **How to ensure message ordering in Kafka?**
     * Kafka guarantees ordering only per partition, so use the same key to route related messages to the same partition.
     * **What is NOT guaranteed**
@@ -315,17 +383,29 @@
         * ✔ Better reliability, ❌ more code and careful handling needed.
     * **Interview takeaway:** Use auto-commit for simple consumers; manual commit for critical processing.
 
-    * **Production War Story — Follow-up (Expert): Your consumer used `enable.auto.commit=true` and you saw messages getting processed twice after a pod restart. Walk through the exact sequence of events that caused this.**
-        * **The sequence:**
-            1. Consumer polls 100 records (offsets 1000–1099). `auto.commit.interval.ms=5000`.
-            2. Consumer processes records 1000–1089 (90 messages) in 4.8 seconds.
-            3. At 5 seconds, auto-commit fires — BUT it commits the offset that was returned by the *last poll*, which was offset 1000 (start of the batch), not 1089 (last processed).
-            4. Actually, auto-commit commits the offset of the *last returned record of the last poll* — offset 1099 — even though records 1090–1099 haven’t been processed yet.
-            5. Pod crashes at record 1092.
-            6. On restart, consumer starts from committed offset 1100 — records 1093–1099 are **silently skipped**.
-        * **The inverse scenario (duplicates):** Auto-commit fires at offset 1099. Pod crashes immediately after. On restart, offset is 1099 but business logic for records 1090–1099 was never completed (DB write failed mid-batch). Records 1090-1099 need reprocessing but Kafka thinks they’re done.
-        * **The real contract:** Auto-commit gives you **at-most-once** (can skip) or creates silent gaps. It never guarantees at-least-once. For production critical consumers, always use `enable.auto.commit=false` with `AckMode.MANUAL_IMMEDIATE` and commit *after* successful processing:
-        ```java
+  * **Production War Story — Follow-up (Expert): Your consumer used `enable.auto.commit=true` and you saw messages getting processed twice after a pod restart. Walk through the exact sequence of events that caused this.**
+  * **What auto-commit actually does:** Every `auto.commit.interval.ms` (default 5s), Kafka commits the offset of the **last message returned by `poll()`** — regardless of whether your code actually finished processing it.
+  * **The duplicate scenario (at-least-once violation):**
+      1. `poll()` returns offsets 1000–1099 (100 messages)
+      2. Your code processes 1000–1089, then auto-commit fires at 5s — commits offset 1099 (last polled, not last processed)
+      3. Pod crashes at record 1092 — business logic for 1090–1099 never completed (DB write failed)
+      4. On restart, Kafka says "you're at 1100, move on" — records 1090–1099 are **silently skipped**, never reprocessed
+  * **The skip scenario (at-most-once):**
+      1. Same poll: 1000–1099. Auto-commit has NOT fired yet.
+      2. Pod crashes at record 1050 — committed offset is still 999 (from previous batch)
+      3. On restart, consumer re-reads from 1000 — records 1000–1049 are **processed twice**
+  * **Root cause:** Auto-commit is time-based, not processing-based. It has no idea if your business logic succeeded or failed. It just commits whatever `poll()` last returned.
+  * **Fix — always use manual commit for critical consumers:**
+    ```java
+            enable.auto.commit=false
+    
+            // commit only after successful processing
+            consumer.commitSync(); // blocks until broker confirms
+            // or
+            consumer.commitAsync(); // non-blocking, use with retry logic
+    ```
+    * **Rule:** Auto-commit = convenience for non-critical consumers. For anything touching DBs, payments, or state — `enable.auto.commit=false` with manual `commitSync()` after each successful batch.    
+   ```java
         @KafkaListener(topics = "payments", ackMode = "MANUAL_IMMEDIATE")
         public void consume(ConsumerRecord<String, Payment> record, Acknowledgment ack) {
             try {
@@ -339,7 +419,7 @@
                 ack.acknowledge(); // commit to unblock partition
             }
         }
-        ```
+  ```
 
 ---
 * [x] **What is consumer lag and how to monitor it?**
@@ -402,43 +482,51 @@
             * Commit consumer offsets as part of the same transaction
         * **Atomic commit or abort:** Either all writes + offsets succeed, or nothing is visible.
 
-    * **Production War Story — Follow-up (Expert): You implemented EOS (exactly-once semantics) with `transactional.id` in your payment service. After a deployment, you saw `ProducerFencedException` exceptions flooding logs and no messages being produced. What happened?**
-        * **Root cause — transactional.id reuse during rolling deployment:** Kafka associates a `transactional.id` with an epoch. When a new producer instance initializes with the same `transactional.id`, Kafka **increments the epoch** and fences (kills) the old producer with that id. This is by design — it prevents zombie producers from writing stale data.
-        * **What happened:** Rolling deployment spun up new pod with `transactional.id=payment-producer-1`. Kafka fenced the old pod’s producer. Old pod was still processing its current batch — its next send threw `ProducerFencedException`. Since the exception wasn’t handled correctly, the consumer’s offset was never committed, causing both pods to attempt reprocessing.
-        * **Correct `transactional.id` strategy for Kubernetes:**
+    * **Production War Story — Follow-up (Expert): You implemented EOS with `transactional.id` in your payment service. After a deployment, you saw `ProducerFencedException` flooding logs. What happened?**
+        * **What is `transactional.id` and epoch?** Kafka tracks every `transactional.id` with an internal counter called **epoch**. The epoch exists to prevent two producers with the same id from writing at the same time (zombie protection).
+        * **What happens on new producer init:** Every time a producer starts with the same `transactional.id`, Kafka **increments the epoch** and immediately **fences (invalidates)** the old producer. Any send from the old producer now throws `ProducerFencedException`.
+        * **The rolling deployment problem:**
+            1. Old pod running with `transactional.id=payment-producer-1`, epoch=5, mid-batch
+            2. New pod starts, initializes same `transactional.id=payment-producer-1` → Kafka bumps epoch to 6
+            3. Old pod tries to send next message → `ProducerFencedException` (epoch 5 is now dead)
+            4. Old pod didn't handle this → offset never committed → both pods reprocess same messages
+        * **Fix — make `transactional.id` stable and unique per partition, not per pod:**
         ```java
-        // Use a stable, pod-unique ID — NOT a random UUID (defeats the purpose)
-        // Good: tied to partition assignment (Kafka Streams does this automatically)
-        String txId = "payment-service-" + partition; // stable per partition
+        // BAD — every pod restart gets fenced by the next pod
+        transactional.id = "payment-producer-1"  // same id, all pods
 
-        // In Spring Kafka — use unique-per-partition transaction id prefix
-        @Bean
-        public ProducerFactory<String, Payment> producerFactory() {
-            Map<String, Object> props = new HashMap<>();
-            props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "payment-tx-");
-            // Spring Kafka appends partition number automatically
-            return new DefaultKafkaProducerFactory<>(props);
-        }
+        // GOOD — tie to partition, so only one producer ever owns it
+        transactional.id = "payment-service-" + assignedPartition  // e.g. payment-service-3
         ```
-        * **Handle `ProducerFencedException` explicitly:** It is NOT retryable. The correct action is to close the producer, log the event, and let the pod restart/reinitialize cleanly. Never retry on `ProducerFencedException`.
-        * **EOS performance cost:** Transactions add ~5-10ms latency per commit (coordinator round-trip). For 10K TPS payment systems, benchmark before enabling. Use transactions only for topics where exactly-once is business-critical (payment events, inventory adjustments) — not for analytics/logging topics.
+        * **Handle `ProducerFencedException` correctly:** It is NOT retryable. Close the producer and let the pod reinitialize. Never retry — the epoch is already dead.
+        * **EOS performance cost:** ~5-10ms latency per transaction commit. Only enable for business-critical topics (payments, inventory) — not for logs or analytics.
 
 ---
 * [x] **What is log compaction?**
     * Log compaction keeps the latest record per key, making Kafka suitable for maintaining the latest state.
 
-    * **Production War Story — Follow-up (Expert): You used a log-compacted topic for user profile state. After enabling compaction, a consumer reading from the beginning got completely different data than a consumer reading from the middle. Explain why and what operational guarantee compaction actually provides.**
-        * **What happened:** Log compaction runs asynchronously in the background — it does NOT guarantee that at any given moment, only the latest record per key is present in the topic. The "head" (recent segment) is never compacted. The "tail" (older segments) is compacted eventually.
-        * **Concrete sequence:**
-            * User 42's profile was updated 5 times. Records at offsets 100, 500, 1200, 3400, 7800.
-            * Consumer A starts from offset 0: reads all 5 records, applies them in order, ends with the latest state. Correct.
-            * Consumer B starts from offset 2000 (after compaction ran on segments 0–1999): only sees offsets 3400 and 7800. Correct — it gets the "latest at compaction time" version from 3400, then the actual latest at 7800.
-            * Consumer C starts from offset 4000: only sees offset 7800. Correct.
-        * **The guarantee compaction provides:** After compaction completes on a segment, for each key, only the **latest record in that segment range** survives. It does NOT mean only one record per key exists at any moment.
-        * **Tombstone records:** Producing a record with `value=null` for a key marks it for deletion. After compaction, the key is removed. But tombstones are retained for `delete.retention.ms` (default 24h) before removal — so consumers reading after the tombstone but before deletion can still see the "deleted" signal.
-        * **Compaction pitfall — missing deletes:** If a consumer reads after a key’s tombstone has been cleaned up (past `delete.retention.ms`), it will never see that the key was deleted. For CDC pipelines syncing Kafka to a database, this means deleted records may never be removed from the target DB. Always set `delete.retention.ms` longer than your maximum consumer restart gap.
+    * **Production War Story — Follow-up (Expert): You used a log-compacted topic for user profile state. After enabling compaction, a consumer reading from the beginning got completely different data than a consumer reading from the middle. Explain why.**
+        * **What compaction actually does:** Compaction runs as a **background job** on older segments. It does NOT instantly remove old records. The recent/active segment (called the "head") is NEVER compacted. Only older closed segments (the "tail") get cleaned up eventually.
+        * **So at any moment, a topic can look like this:**
+            ```
+            Tail (compacted)        | Head (never compacted)
+            ------------------------|------------------------
+            offset 100 → user42 v1  | offset 3400 → user42 v4
+            offset 500 → user42 v2  | offset 7800 → user42 v5
+            (these may still exist  | (always present, raw)
+             until compaction runs) |
+            ```
+        * **Why two consumers saw different data:**
+            * Consumer A from offset 0 → sees all 5 versions of user42, applies in order → correct final state
+            * Consumer B from offset 4000 → only sees offset 7800 (latest) → also correct, but looks "different"
+            * They're both correct — compaction only guarantees the **latest record per key survives in compacted segments**, not that only one record exists at any moment
+        * **Tombstone (delete) pitfall:** To delete a key, produce `value=null` (tombstone). Kafka retains the tombstone for `delete.retention.ms` (default 24h), then removes it. If your consumer was down for >24h and restarts after tombstone cleanup — it **never sees the delete**, and your downstream DB still has the stale record.
+        * **Fix:** Set `delete.retention.ms` longer than your maximum possible consumer downtime window.
+        ```properties
+        delete.retention.ms=604800000  # 7 days — safe for most consumers
+        ```
 
----
+
 * [x] **How to handle message retries?**
     * message retries are handled at producer side and consumer side, depending on the failure type.
     * **Producer-side retries**
@@ -638,21 +726,33 @@ In **Apache Kafka**, brokers can be added or removed **without downtime** using 
 
     * **Production War Story — Follow-up (Expert): Your monitoring showed `UnderReplicatedPartitions > 0` for 20 minutes. The team ignored it thinking it was a transient blip. What were the actual downstream risks during those 20 minutes and what should the incident response have been?**
         * **What `UnderReplicatedPartitions > 0` means:** At least one partition has fewer in-sync replicas than `replication.factor`. The cluster is operating with reduced durability.
+        * **First, understand how `min.insync.replicas` and ISR interact:**
+            * `min.insync.replicas=2` means: Kafka will **refuse** `acks=all` writes if ISR drops below 2
+            * So when ISR=1, `acks=all` producers immediately get `NotEnoughReplicasException` — writes are **rejected**, not silently accepted
+            * BUT producers using `acks=1` (only leader must acknowledge) are completely unaffected — they keep writing successfully to the leader alone, with zero replica backup
         * **Risks during those 20 minutes:**
-            1. **Reduced durability:** If `min.insync.replicas=2` and ISR=1, every `acks=all` write is only on 1 broker. A broker crash during this window = permanent data loss for those messages.
-            2. **No leader failover safety:** If the partition leader crashes, only ISR members can become leader. With ISR=1 (the leader itself), a leader crash = partition becomes unavailable (LeaderNotAvailableException) until the lagging replica catches up.
-            3. **Silent producer errors:** With `min.insync.replicas=2` and only 1 ISR, producers using `acks=all` get `NotEnoughReplicasException`. If this wasn't alerting, messages may have been silently dropped depending on producer error handling.
+            1. **`acks=all` producers:** Writes are rejected with `NotEnoughReplicasException`. No data loss, but your service is down/erroring until ISR recovers.
+            2. **`acks=1` producers:** Writes succeed and appear fine — but data only exists on 1 broker. If that broker crashes before the lagging replica catches up = **permanent data loss** for those messages.
+            3. **Leader crash = partition unavailable:** With ISR=1 (only the leader), if the leader dies, there is no eligible replica to take over. Partition stays unavailable until the lagging replica catches up — which could take minutes to hours depending on lag size.
+        * **The silent danger:** Teams assume `UnderReplicatedPartitions` is a replication lag issue (transient, self-healing). It is — until the leader crashes during that window. The risk is not the under-replication itself, it's what a crash during under-replication causes.
         * **Correct incident response:**
-        ```
-        T+0:  UnderReplicatedPartitions alert fires
-        T+1:  Identify which broker is lagging: kafka-topics.sh --describe | grep "Isr" | grep -v all replicas
-        T+2:  Check broker logs for: disk full, GC pressure, network issues, high replication lag
-        T+5:  If broker is alive but slow: check replica.lag.time.max.ms — may need temporary increase
-        T+10: If broker is down: check if it’s recovering; don’t force unclean election
-        T+15: If broker can’t recover: reassign affected partitions to healthy brokers
-        T+20: Validate ISR count is back to replication.factor for all partitions before closing incident
-        ```
+            1. Alert immediately when `UnderReplicatedPartitions > 0` for >2 minutes (not 20)
+            2. Identify which broker is lagging: `kafka-topics --describe` shows ISR per partition
+            3. Check that broker's logs for GC pauses, disk I/O, network issues
+            4. Do NOT restart the lagging broker immediately — let it catch up first, restart only if it's stuck
+            5. If broker is stuck and not catching up, controlled restart is safer than waiting indefinitely
         * **Prevention:** Set `replica.lag.time.max.ms=60000` (generous), alert on `UnderReplicatedPartitions > 0` for **more than 2 minutes** (short blips are normal during broker restarts), and have a runbook that mandates immediate escalation — not "watch and wait".
+
+    * **What is a "transient blip" and when is it normal vs not?**
+        * A transient blip = `UnderReplicatedPartitions` spikes briefly (seconds) then self-heals. This is normal and expected in these situations:
+            * Broker restart (rolling deployment) — replica briefly falls out of ISR, catches up in seconds
+            * Temporary network hiccup — replica pauses replication briefly, rejoins ISR automatically
+            * Leader election — new leader elected, followers briefly lag, catch up fast
+        * **How Kafka self-heals:** The lagging replica keeps fetching from the leader. Once it has caught up to within `replica.lag.time.max.ms` (default 30s), Kafka automatically adds it back to ISR. No manual action needed.
+        * **When it is NOT a transient blip (treat as incident):**
+            * `UnderReplicatedPartitions > 0` for more than 2-3 minutes continuously → replica is stuck, not catching up
+            * Common causes: broker disk full, broker GC paused too long, network partition between brokers, broker process hung
+        * **Simple rule:** If it recovers in <2 minutes = transient, monitor. If it stays > 2 minutes = something is genuinely wrong on that broker, investigate immediately.
 
 ### Integration
 

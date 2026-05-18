@@ -15,6 +15,61 @@
     - ⚠️ **May produce false positives** ("might be in set")
 - **Immutable**: Cannot delete items once added
 
+# Bloom Filter Basics
+
+To create a Bloom Filter, you provide:
+
+* `n` = Expected number of items
+* `p` = Desired false positive rate
+
+## Redis Command
+
+```bash id="bf12x"
+BF.RESERVE myfilter 0.01 1000000
+```
+
+* `p = 0.01` (1%)
+* `n = 1,000,000`
+
+## Redis Calculates
+
+### 1. Bitmap Size (`m`)
+
+  ```
+  m = -(n * ln(p)) / (ln(2)^2)
+
+  ```
+  
+* `m` = number of bits to allocate
+
+### 2. Number of Hash Functions (`k`)
+
+```
+k = -log2(p)
+k = -log2(0.01) ≈ 6.64 ≈ 7
+```
+
+## Example Result
+
+For `n = 1,000,000` and `p = 0.01`:
+
+* `m ≈ 9.6 million bits` (~1.2 MB)
+* `k ≈ 7`
+
+## Summary
+
+| Input | Meaning             |
+| ----- | ------------------- |
+| `n`   | Expected items      |
+| `p`   | False positive rate |
+
+| Calculated | Meaning                  |
+| ---------- | ------------------------ |
+| `m`        | Bitmap size              |
+| `k`        | Number of hash functions |
+
+
+
 ### Basic Example:
 ```
 Question: "Has user123 been rate-limited in the last hour?"

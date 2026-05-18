@@ -181,7 +181,7 @@ This keeps read performance healthy and reclaims disk space.
 
 | Operation | How LSM handles it |
 |---|---|
-| Write | MemTable → WAL → SSTable (sequential, fast) |
+| Write | WAL (Commit Log) → MemTable → later flush to SSTable (sequential, fast) |
 | Read | MemTable → SSTables (Bloom filter skips irrelevant ones) |
 | Update | Append new version, compaction keeps latest |
 | Delete | Append tombstone, compaction discards it |
@@ -249,7 +249,7 @@ Node D              Node B
 Write "user123":
   hash("user123") = 310  →  lands on Node B
   shard_id = (token >> (64 - 12)) % number_of_cpu_cores -> finds which shard to read
-  RF=3 means also written to Node C and Node D
+  RF=3 means (Replication Factor) also written to Node C and Node D
 ```
 
 ### Write Path — Commit Log, MemTable, SSTable
@@ -268,15 +268,15 @@ Client Write
     ▼
 Coordinator (any node — receives the request and routes it)
     │
-    ├──────────────────────────┐
-    ▼                          ▼
-Replica 1                  Replica 2  (RF=3 → 3 replicas total)
-    │                          │
-    ├─ 1. Commit Log (disk)     ├─ 1. Commit Log (disk)
-    │    append-only, fast      │    durability guarantee
-    │                           │
-    └─ 2. MemTable (memory)     └─ 2. MemTable (memory)
-         sorted buffer               sorted buffer
+    ├─
+    ▼                          
+Replica 1, 2   (Both store same way  as done with the leader)             
+    │                          
+    ├─ 1. Commit Log (disk)     
+    │    append-only, fast      
+    │                           
+    └─ 2. MemTable (memory)     
+         sorted buffer               
          │
          │ (when full)
          ▼

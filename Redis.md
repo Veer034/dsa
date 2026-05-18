@@ -875,6 +875,7 @@ Below is the **same `.md` format**, but now each example explains **what actuall
         * `INFO persistence` → check `rdb_last_bgsave_time_sec`
         * `INFO stats` → check `blocked_clients`, `rejected_connections`
     * **Common Root Causes and Fixes:**
+    * 
       | Symptom | Root Cause | Fix |
       |---------|-----------|-----|
       | Every 5min spike | BGSAVE triggered | Tune `save` config or move to AOF-only |
@@ -1138,6 +1139,7 @@ Below is the **same `.md` format**, but now each example explains **what actuall
         XAUTOCLAIM orders order-processors worker-2 60000 0-0
         ```
     * **Decision Framework:**
+    * 
       | Need | Use |
       |------|-----|
       | Real-time, loss-tolerant | Pub/Sub |

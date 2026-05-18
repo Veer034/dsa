@@ -13,6 +13,7 @@
 5. [Flink vs Spark Streaming vs Kafka Streams](#5-flink-vs-spark-streaming-vs-kafka-streams)
 6. [Why Flink over Spark?](#6-why-flink-over-spark)
 7. [General Data Engineering Questions](#7-general-data-engineering-questions)
+8. [Senior/Staff Engineer — Production Problem Deep Dive](#8-seniorstaff-engineer--production-problem-deep-dive)
 
 ---
 
@@ -391,7 +392,7 @@ On failure:
 // Enable incremental checkpointing — the 'true' argument
 // Flink tracks which RocksDB SSTable files are new since last checkpoint
 // Only those new files are uploaded — previously uploaded files are reused
-EmbeddedRocksDBStateBackend rocksDB = new EmbeddedRocksDBStateBackend(true);
+EmbeddedRocksDBStateBackend rocksDB = new EmbeddedRocksDBStateBackend(true));
 env.setStateBackend(rocksDB);
 
 // Also tune how many threads upload checkpoint files to S3 in parallel
@@ -768,4 +769,249 @@ metricsStream.addSink(esSinkBuilder.build());
 
 ---
 
-*Last updated: March 2026*
+## 8. Senior/Staff Engineer — Production Problem Deep Dive
+
+> This section covers a class of problems asked specifically of engineers with 8–12+ years of experience at product companies like Meta, LinkedIn, Uber, Stripe, and Confluent. The expectation is not just "what went wrong" but "how did you diagnose it, what was the blast radius, what were the trade-offs in your fix, and how did you prevent recurrence."
+
+---
+
+### Problem: Silent Data Loss After a Flink Job Rescale in Production
+
+#### The Scenario
+
+Your team scales a Flink job from parallelism 16 to parallelism 32 mid-flight (a common need after onboarding new customers). You trigger a savepoint, stop the job, update the parallelism config, and restart from the savepoint. The job comes up healthy — no exceptions, no restarts, green in the Flink UI.
+
+Three hours later, your data integrity monitoring alerts: **certain tenant aggregations are 15–20% lower than expected for the post-rescale window**. No data is in the late-events side output topic either. The events simply never got counted.
+
+**Interview question**: *"Walk me through how you'd diagnose this, what the root cause is, and how you'd prevent it."*
+
+---
+
+#### Why This Happens — Root Cause
+
+The bug is subtle and not obvious without deep understanding of how Flink manages keyed state across rescales.
+
+When you rescale a Flink job (change parallelism), Flink redistributes keyed state from the savepoint across the new number of subtasks using a mechanism called **key group redistribution**. Flink partitions the key space into a fixed number of **key groups** (default: 128 max parallelism) and assigns groups to subtasks.
+
+The problem here was **not** in state redistribution — Flink handles that correctly. The silent data loss came from a combination of two things:
+
+**Root cause 1 — Watermark reset on rescale**
+
+When the job restarted from the savepoint, watermarks were restored per-subtask from the saved state. However, at parallelism 32, some of the new subtasks had no events yet flowing through them (because Kafka's 32 partitions were still rebalancing consumer group assignments internally). Those idle subtasks emitted a watermark of `Long.MIN_VALUE`.
+
+Flink computes the **global watermark as the minimum across all parallel subtasks**. With even one idle subtask emitting `Long.MIN_VALUE`, the global watermark stalled at negative infinity — **no windows fired for several minutes** until Kafka partition reassignment completed and all subtasks received at least one event.
+
+**Root cause 2 — Events arriving during the watermark stall fell into windows that had already "conceptually" closed**
+
+During the stall window (roughly 4 minutes), events kept arriving with real event timestamps. When the watermark finally advanced past those window boundaries, Flink evaluated those events as "late" because `event_time < watermark` — even though they arrived during the stall. With `allowedLateness` set to only 10 seconds, they were routed to the side output. But because this happened during the rescale window — a known maintenance event — nobody was monitoring the side output topic for that period. The data appeared "gone."
+
+```
+Timeline of the incident:
+
+T+0:00  Savepoint triggered, job stopped
+T+0:03  Job restarted at parallelism 32
+T+0:03  Kafka rebalancing begins (32 subtasks now competing for 32 partitions)
+T+0:03  Subtasks 17–32 idle → emit watermark = Long.MIN_VALUE
+T+0:03  Global watermark = Long.MIN_VALUE → no windows fire
+T+0:07  Kafka rebalancing completes, all subtasks receive events
+T+0:07  Watermarks advance → global watermark jumps forward ~4 minutes
+T+0:07  All events that arrived T+0:03 → T+0:07 are now "late" by 4 minutes
+T+0:07  allowedLateness = 10 seconds → all of them routed to side output
+T+0:07  Side output topic not being actively drained → events sit unprocessed
+T+3:00  Monitoring detects 15-20% aggregation deficit
+```
+
+---
+
+#### Diagnosis Steps
+
+A senior engineer should be able to walk through this systematically:
+
+**Step 1 — Confirm no job failures**
+```bash
+# Check Flink job history for exceptions or task failures
+curl http://flink-jobmanager:8081/jobs/<jobId>/exceptions
+# Also check Flink Web UI → Job → Exceptions tab
+```
+
+**Step 2 — Check watermark progression after restart**
+
+The Flink Web UI shows per-operator watermarks. Immediately after rescale, look for:
+- Any subtask showing `watermark = -9223372036854775808` (Long.MIN_VALUE) — that subtask is idle
+- Global watermark stalled while individual subtasks advance
+
+```java
+// Add watermark monitoring metric to catch this in future
+public class WatermarkMonitoringProcessFunction
+        extends KeyedProcessFunction<String, Event, Event> {
+
+    private transient Counter staleWatermarkCounter;
+
+    @Override
+    public void open(Configuration parameters) {
+        staleWatermarkCounter = getRuntimeContext()
+            .getMetricGroup()
+            .counter("stale_watermark_events");
+    }
+
+    @Override
+    public void processElement(Event event, Context ctx, Collector<Event> out) {
+        long currentWatermark = ctx.timerService().currentWatermark();
+        long eventTime = event.getEventTimestamp();
+
+        // Flag events that arrive significantly behind current watermark
+        if (currentWatermark - eventTime > 60_000) { // 60 seconds behind
+            staleWatermarkCounter.inc();
+        }
+        out.collect(event);
+    }
+}
+```
+
+**Step 3 — Check side output topic lag**
+```bash
+# If side output Kafka topic has unexpected backlog right after rescale → confirms late-event routing
+kafka-consumer-groups.sh --bootstrap-server kafka:9092 \
+  --describe --group flink-late-events-consumer
+```
+
+**Step 4 — Correlate with Kafka consumer group rebalance logs**
+
+The Kafka broker logs and consumer group coordinator logs will show the exact timestamp of partition reassignment completion. Cross-referencing this with the watermark stall duration in Flink metrics confirms the root cause.
+
+---
+
+#### The Fix — Multiple Layers
+
+A staff-level answer must address all three layers: immediate mitigation, code fix, and operational safeguard.
+
+**Fix 1 — Idle source watermark emission (code fix)**
+
+Tell Flink to emit a periodic watermark even from idle subtasks, so one lagging partition doesn't stall the entire global watermark.
+
+```java
+WatermarkStrategy<ContactCenterEvent> watermarkStrategy =
+    WatermarkStrategy
+        .<ContactCenterEvent>forBoundedOutOfOrderness(Duration.ofSeconds(10))
+        .withTimestampAssigner(
+            (event, recordTimestamp) -> event.getEventTimestamp()
+        )
+        // KEY FIX: if a subtask receives no events for 5 seconds,
+        // it emits the current processing-time watermark instead of stalling.
+        // This prevents one idle subtask from blocking global watermark progress.
+        .withIdleness(Duration.ofSeconds(5));
+```
+
+**Why this works**: `withIdleness()` tells Flink: "If this source partition is idle for N seconds, exclude it from the global watermark minimum computation." The global watermark advances based on the active subtasks only.
+
+**Important caveat for the interview**: If a partition is genuinely idle (e.g., a tenant with no traffic), this is correct behavior. If a partition is idle because Kafka rebalancing hasn't assigned it yet, this also saves you. However, if a partition *silently* stops receiving messages due to a producer bug, `withIdleness()` will mask that problem — the watermark will advance and windows will fire even though data is missing. You need separate consumer-lag monitoring to catch that case.
+
+**Fix 2 — Increase allowedLateness during rescale operations**
+
+Operationally, coordinate rescales with a temporary lateness window increase via a feature flag:
+
+```java
+// Read lateness config from an external system (e.g., a config map or feature flag)
+// This lets ops temporarily increase allowed lateness before rescale without redeployment
+long allowedLatenessMs = configService.getLong("flink.allowed.lateness.ms", 10_000L);
+
+SingleOutputStreamOperator<AgentMetrics> mainStream = eventStream
+    .keyBy(e -> e.getTenantId())
+    .window(TumblingEventTimeWindows.of(Time.minutes(5)))
+    .allowedLateness(Time.milliseconds(allowedLatenessMs))
+    .sideOutputLateData(lateEventsTag)
+    .aggregate(new MetricsAggregator());
+```
+
+Before any rescale: set `flink.allowed.lateness.ms = 600000` (10 minutes). After rebalance stabilizes: reset to 10 seconds.
+
+**Fix 3 — Active side output draining with alerting**
+
+The late-events topic should always have an active consumer, not just a "reprocess later" promise:
+
+```java
+// A dedicated job that continuously reads the late-events topic
+// and reprocesses events back into the main aggregation pipeline
+DataStream<ContactCenterEvent> lateEventsReprocessed = env
+    .fromSource(
+        KafkaSource.<ContactCenterEvent>builder()
+            .setBootstrapServers("kafka:9092")
+            .setTopics("late-events-topic")
+            .setGroupId("flink-late-reprocessor")
+            .setStartingOffsets(OffsetsInitializer.committedOffsets())
+            .setValueOnlyDeserializer(new ContactCenterEventDeserializer())
+            .build(),
+        // Use processing-time watermarks for reprocessed events
+        // since we're deliberately catching up, not doing real-time windowing
+        WatermarkStrategy.noWatermarks(),
+        "Late Events Reprocessor"
+    );
+
+// Route into a correction stream that patches aggregation state
+lateEventsReprocessed
+    .keyBy(e -> e.getTenantId())
+    .process(new LateEventCorrectionFunction());
+```
+
+Add a Kafka consumer-lag alert: if the late-events topic consumer lag exceeds 1,000 messages for more than 2 minutes, page on-call.
+
+**Fix 4 — Rescale runbook with pre/post validation**
+
+```bash
+# Pre-rescale checklist (add to runbook):
+
+# 1. Verify current Kafka partition count matches expected parallelism
+kafka-topics.sh --describe --topic contact-center-events --bootstrap-server kafka:9092
+
+# 2. Bump allowedLateness via feature flag before proceeding
+curl -X POST http://config-service/flags/flink.allowed.lateness.ms -d '{"value": 600000}'
+
+# 3. Trigger savepoint
+flink savepoint <jobId> s3://bucket/savepoints/pre-rescale-$(date +%Y%m%d-%H%M%S)/
+
+# 4. Stop job
+flink cancel --withSavepoint <jobId>
+
+# 5. Restart at new parallelism
+flink run -s <savepoint-path> -p 32 your-job.jar
+
+# Post-rescale validation (wait 10 minutes, then check):
+# - All subtasks showing non-MIN_VALUE watermarks in Flink UI
+# - Late-events topic consumer lag near zero
+# - Aggregation counts within 2% of pre-rescale baseline (compare rolling 5-min windows)
+# - Reset allowedLateness to 10 seconds
+curl -X POST http://config-service/flags/flink.allowed.lateness.ms -d '{"value": 10000}'
+```
+
+---
+
+#### Trade-offs to Discuss in the Interview
+
+A staff-level interview will probe whether you understand the trade-offs of each fix. Be prepared to discuss:
+
+| Fix | Benefit | Trade-off |
+|---|---|---|
+| `withIdleness()` | Prevents watermark stall from idle partitions | Masks genuine producer failures — need external lag monitoring to compensate |
+| Increase `allowedLateness` | Captures events that arrive during rescale gap | Delays window result emission; downstream consumers see results later |
+| Late-event reprocessing job | Guarantees no data permanently lost | Adds operational complexity; correction events can arrive out of order and cause downstream idempotency issues |
+| Config-driven lateness | Ops can adjust without redeployment | Config service becomes a dependency; wrong value can cause state to grow unboundedly |
+
+**The follow-up question interviewers ask**: *"If you couldn't use `withIdleness()` — say you're on Flink 1.10 which doesn't support it — what would you do?"*
+
+Answer: Manually inject synthetic "heartbeat" events into each Kafka partition on a fixed schedule (e.g., every 2 seconds) from a lightweight producer. These heartbeat events carry the current processing time as their event timestamp, which drives the watermark forward even on idle partitions. The Flink job filters them out before aggregation using a simple `.filter(e -> !e.isHeartbeat())`.
+
+---
+
+#### What This Question Is Really Testing
+
+At the staff/principal level, interviewers aren't just checking whether you know the `withIdleness()` API. They want to see:
+
+- **Systems thinking**: You identified that the root cause was an interaction between Kafka rebalancing timing and Flink's global watermark minimum — two systems failing together, neither of which was broken on its own.
+- **Blast radius awareness**: You recognized that the data wasn't "lost" — it was in the side output topic — and you had a recovery path.
+- **Defense in depth**: You proposed fixes at three layers (code, operations, monitoring) rather than a single point solution.
+- **Trade-off reasoning**: You articulated why `withIdleness()` creates a new risk (masking producer failures) and how to close that gap with consumer-lag monitoring.
+- **Production discipline**: You converted the diagnosis into a runbook that prevents recurrence, not just a one-time fix.
+
+---
+
+*Last updated: May 2026*

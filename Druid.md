@@ -30,33 +30,57 @@ There are 3 deployment tiers:
 
 ### The 6 Druid Services
 
+<img src="./img/druid_cluster_3vm_architecture.svg" height="800" width="800" alt="My diagram" >
+
+### 1. Coordinator
+**What:** The cluster manager / boss of data placement.
+**How:** It talks to ZooKeeper to know which Historical nodes are alive, then decides which segments (chunks of your data) go on which Historical node. It also handles replication and dropping old segments.
+
+### 2. Overlord
+**What:** The boss of ingestion jobs.
+**How:** When you submit a task ("ingest this Kafka topic"), the Overlord receives it and assigns it to a MiddleManager. It tracks whether tasks succeed or fail.
+
+### 3. MiddleManager
+**What:** The worker that actually ingests data.
+**How:** It spawns sub-processes called **Peons** that read from Kafka/files, convert the data into Druid's columnar segment format, and push finished segments to Deep Storage.
+
+### 4. Historical
+**What:** The node that serves query data.
+**How:** It downloads segments from Deep Storage into local disk (or memory-mapped files), and when the Broker asks "give me data for time range X", it scans its segments and returns results. More RAM = more segments stay hot = faster queries.
+
+### 5. Broker
+**What:** The query coordinator / scatter-gather engine.
+**How:** It receives your SQL/JSON query, figures out which time ranges and segments are involved (using metadata from ZooKeeper/Coordinator), fans the query out to the right Historical nodes in parallel, merges all the partial results, and returns the final answer to you.
+
+### 6. Router (Optional)
+**What:** A simple HTTP gateway / load balancer.
+**How:** It sits in front of Brokers. If you have multiple Brokers, Router decides which one gets your query. That's it — it has no query logic of its own.
+
+---
+
+## The Corrected Data Flow (Simple)
+
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Druid Cluster                           │
-│                                                             │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
-│  │   Kafka /    │    │   Batch      │    │   Queries    │  │
-│  │   Kinesis    │    │   Files      │    │   (SQL/JSON) │  │
-│  └──────┬───────┘    └──────┬───────┘    └──────┬───────┘  │
-│         │                   │                   │          │
-│         ▼                   ▼                   ▼          │
-│  ┌─────────────┐    ┌──────────────┐    ┌──────────────┐   │
-│  │MiddleManager│    │  Coordinator │    │   Broker     │   │
-│  │ (Ingestion) │    │ (Scheduling) │    │ (Query fanout│   │
-│  └──────┬───────┘   └──────────────┘    └──────┬───────┘   │
-│         │                                       │           │
-│         ▼                                       ▼           │
-│  ┌─────────────┐                       ┌──────────────┐    │
-│  │  Historical  │◄──────────────────── │   Router     │    │
-│  │ (Stores      │   Broker queries      │ (Routes to   │    │
-│  │  segments)   │   segment data        │  Broker)     │    │
-│  └─────────────┘                       └──────────────┘    │
-│         ▲                                                   │
-│  ┌─────────────┐                                           │
-│  │Deep Storage │  (S3 / HDFS / GCS — source of truth)      │
-│  └─────────────┘                                           │
-└─────────────────────────────────────────────────────────────┘
+Client Query
+    │
+    ▼
+  Router  ──────────────────► Broker
+                                 │
+                    ┌────────────┼────────────┐
+                    ▼            ▼            ▼
+               Historical   Historical   Historical
+               (segment A)  (segment B)  (segment C)
+                    │            │            │
+                    └────────────┴────────────┘
+                                 │
+                            Broker merges
+                                 │
+                                 ▼
+                           Final Result
 ```
+
+---
+
 
 ### Recommended VM Config per Node (Small Production — 3 VM Setup)
 
@@ -147,41 +171,63 @@ Column: revenue   [ 10, 20, 5,  15, 8,  12 ... ]
 
 ## How Druid Works Internally
 
-### Segments — How Data is Stored
+Great question. Let me explain the full journey — from Kafka record landing to a fast query — with diagrams at each stage.
 
-Druid splits data into **segments** — time-partitioned chunks of compressed columnar data, typically covering one hour or one day of events.
+---
 
-```
-datasource: "page_views"
+#### Stage 1 — How Druid ingests from KafkaThose 1 million records don't land in Druid as rows. The MiddleManager reads batches from Kafka partitions, converts them in memory, and produces a **segment file** — this is the core of why Druid is fast. Now let's look at what's inside that segment.
 
-Segment: 2024-01-01T00/PT1H  (1 hour of data)
-┌──────────────────────────────────────────────────┐
-│  Timestamp column  │  2024-01-01 00:00 to 00:59  │
-│  Dimension columns │  page, country, device_type  │
-│  Metric columns    │  views, clicks, revenue      │
-│  Stored as:                                       │
-│    - Compressed column files                      │
-│    - Bitmap index per dimension value             │
-│    - Pre-rolled up at ingest (if rollup enabled)  │
-└──────────────────────────────────────────────────┘
-```
+<img src="./img/druid_kafka_ingestion_flow.svg" height="400" width="800"/>
+---
 
-### The Rollup Feature
+#### Stage 2 — What's inside a segment (the real speed secret)Now you can see the two core tricks inside every segment. The third trick is pre-aggregation at write time — which is what really makes Druid different from other columnar stores.
 
-```
-Raw events (Kafka):
-  timestamp            page       country   views
-  2024-01-01 00:01     /home      US        1
-  2024-01-01 00:01     /home      US        1
-  2024-01-01 00:01     /home      US        1
+<img src="./img/druid_segment_internals.svg" height="600" width="800"/>
+---
 
-With rollup (granularity = 1 minute):
-  timestamp            page       country   views (SUM)
-  2024-01-01 00:01     /home      US        3   ← 3 rows → 1
+#### Stage 3 — Rollup: pre-aggregating at ingest time---
 
-At scale: billions of events → hundreds of millions of rows
-Queries run faster because there's simply less data to scan
-```
+
+<img src="./img/druid_rollup_preaggregation.svg" height="600" width="800"/>
+
+
+ Here's how all three techniques stack together:
+
+**Columnar storage** — when you query `SUM(revenue)`, Druid reads only the `revenue` column bytes off disk. It never touches `city`, `user_id`, or any other column. In a row store like MySQL, every row must be read even if you only want one field.
+
+**Bitmap indexes** — for `WHERE city = 'Delhi'`, Druid doesn't scan rows. It has a pre-built bitmap — one bit per row saying "this row is Delhi or not." It ANDs the bitmap, gets a list of matching row positions, and goes directly to those positions in the revenue column. Filter first, then read only the matching values.
+
+**Rollup (pre-aggregation)** — this is the biggest win. If you configure rollup at ingest time, Druid collapses all Kafka events that share the same `(minute, city, event_type)` into a single row with a `SUM` and `COUNT` already computed. Your 1 million Kafka records might produce only 10,000 rolled-up rows in the segment. A `GROUP BY city` query then just reads 10,000 rows instead of 1,000,000. The aggregation already happened at write time.
+
+**Time partitioning** — segments are sliced by time (e.g. one segment per hour). A query for "last 3 hours" touches only 3 segments. The other 21 segments for the day are never opened at all.
+
+**Memory-mapping** — the Historical node doesn't load segments fully into RAM. It maps them as memory pages. Hot segments (recent hours) stay in OS page cache automatically. Cold ones are fetched from disk only when needed. This is why RAM on the Data Node directly equals query speed.
+
+----
+#### What of the column has very high varieties of values.
+
+<img src="./img/druid_cardinality_bitmap_vs_dictionary.svg" height="600" width="800"/>
+
+
+**Druid does NOT blindly build one bitmap per unique value.** It uses a two-step trick for string columns:
+
+First, a **dictionary** converts every string into a small integer. "Delhi" → 0, "Mumbai" → 1, "Chennai" → 2. Now instead of storing strings, the column is just a list of integers like `[0, 1, 0, 2, 0, ...]`.
+
+Then a **bitmap** is built on those integers, not on the original strings. So instead of a bitmap per city name, there's a bitmap per integer ID. This is far smaller because integers are compact.
+
+Second, Druid uses **Roaring Bitmaps** — a compressed bitmap format that is smart about long runs of zeros. If `user_id=u001` only appears once in a million rows, its bitmap is 999,999 zeros and one 1. Roaring Bitmap stores that as "1 at position 42, rest are zero" — a tiny amount of space instead of a million bits.
+
+**But your instinct is still right — high cardinality still hurts.** If you have 1 million unique user IDs:
+- The dictionary has 1M entries
+- There are 1M bitmaps (even if compressed)
+- A `WHERE user_id = 'xyz'` is still fast (lookup in dictionary → one bitmap read)
+- But `GROUP BY user_id` is painful — Druid has to iterate all 1M groups
+
+This is why Druid is designed around a specific pattern: **low-to-medium cardinality dimensions** (city, country, device type, event type — things with dozens to thousands of values) are where it really shines. High-cardinality columns like `user_id` or `session_id` work but are not what Druid is optimized for. You'd typically use those only for point lookups, not aggregations.
+
+The rule of thumb Druid engineers use: if a column has fewer than ~100,000 distinct values per segment, bitmap indexes stay efficient. Beyond that, you're trading away the speed advantage.
+
+So your 1 million Kafka records end up as maybe a few thousand rolled-up rows, split across columnar files, with bitmap indexes, loaded into a memory-mapped segment on a Historical node — which is why an aggregation that would take seconds in Postgres returns in milliseconds in Druid.
 
 ---
 

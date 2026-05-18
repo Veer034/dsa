@@ -2,13 +2,19 @@
 
 ### Architecture & Core Concepts
 
+<img src="./img/es_architecture.png" width="800" alt="My diagram"/>
+
 * [x] **Explain the internal architecture of Elasticsearch. How do primary and replica shards work together?**
     * Elasticsearch is a distributed search and analytics engine built on Apache Lucene. Its architecture is designed for horizontal scalability, high availability, and fault tolerance.
     * **Core Components:**
         * **Cluster**: A collection of one or more nodes that together hold your entire data and provide indexing and search capabilities.
         * **Node**: A single server that is part of your cluster, stores data, and participates in the cluster's indexing and search operations.
         * **Index**: A collection of documents with similar characteristics. An index is a logical namespace that maps to one or more primary shards and can have zero or more replica shards.
-        * **Shard**: A single Lucene instance - the fundamental unit that actually holds data and performs search operations.
+        * **Shard**: A single Lucene instance with actual data, its a division of index- the fundamental unit that 
+          actually holds 
+          data and performs 
+          search 
+          operations.
 
     * **Shard Architecture**
         * Elasticsearch distributes data across multiple shards for two key reasons: to horizontally scale data volume and to parallelize operations for improved performance.
