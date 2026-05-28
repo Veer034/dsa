@@ -186,7 +186,7 @@ JVM Process Memory
 │
 └── Per-Thread (one per thread, private)
     ├── Thread Stack      ← stack frames for method calls
-    └── PC Register       ← current bytecode instruction pointer
+    └── PC Register       ← a tiny memory space that holds the address of the currently executing JVM instruction (bytecode instruction pointer).
 ```
 
 #### Heap — Where Objects Live
@@ -766,55 +766,51 @@ All objects live here. Every `new` goes to heap. GC manages collection. All thre
 > "Stack is private per thread — holds stack frames for active method calls. Each frame has local variables and the return address. Primitives declared in a method live directly on the stack. Object references live on the stack but the actual object is on the heap. Stack memory is reclaimed instantly when a method returns — no GC needed. Heap is shared across all threads — all objects live here, GC manages collection. The shared heap is why thread safety is necessary — two threads can simultaneously access and modify the same object."
 
 ---
+Here's the updated section with a better JVM explanation and a flow diagram:
 
-### Q12. What happens when you call Thread.start() — Step by step
+---
+
+### Q12. What happens when you call `Thread.start()` — Step by step
 
 #### The Problem First
-You have a `Runnable`. You want it to execute on a separate thread concurrently. `Thread.start()` is what triggers this. But it doesn't just call `run()` — there's a specific sequence involving the JVM and OS.
+You have a `Runnable`. You want it to execute concurrently. `Thread.start()` triggers this — but it doesn't just call `run()`. There's a specific sequence involving the JVM and OS.
 
-#### Step by Step
+
+
+#### Step by Step (Platform Thread)
 
 ```java
-Thread t = new Thread(() -> {
-        System.out.println("running in new thread");
-        });
-        t.start();
+Thread t = new Thread(() -> System.out.println("running in new thread"));
+t.start();
 ```
 
-**Step 1 — `start()` validates state**
-JVM checks `threadStatus`. If thread was already started → throws `IllegalThreadStateException`. A thread can only be started once.
+**Step 1** — `start()` validates state. If already started → `IllegalThreadStateException`. A thread can only be started once.
 
-**Step 2 — JVM calls native `start0()` method**
-`Thread.start()` is a thin Java wrapper. It calls `private native void start0()` — a native method implemented in C inside the JVM.
+**Step 2** — JVM calls native `start0()`. `Thread.start()` is a thin Java wrapper around `private native void start0()`, implemented in C inside the JVM.
 
-**Step 3 — OS creates a new thread**
-`start0()` calls the OS thread creation API (e.g., `pthread_create` on Linux). OS allocates:
-- A new OS thread
-- ~1MB stack memory for it
-- Scheduling entry in OS thread scheduler
+**Step 3** — OS creates a new thread. `start0()` calls the OS API (e.g. `pthread_create` on Linux). The OS allocates a new thread with its own ~1MB stack and adds it to the scheduler.
 
-**Step 4 — JVM links Java Thread to OS thread**
-JVM records the mapping between this Java `Thread` object and the newly created OS thread.
+**Step 4** — JVM links the `Thread` object to the OS thread. Mapping is recorded internally.
 
-**Step 5 — OS schedules the new thread**
-The new OS thread is placed in the OS **run queue** — waiting for a CPU core to become available. It does NOT run immediately.
+**Step 5** — OS places the thread in the run queue. It does **not** run immediately — it waits for a CPU core.
 
-**Step 6 — When OS schedules it, `run()` executes**
-OS assigns a CPU core to the new thread. JVM calls `run()` on your `Runnable`. Your code executes on this new thread's stack.
+**Step 6** — When scheduled, `run()` executes. OS assigns a CPU core. JVM calls `run()` on the new thread's stack.
 
-**Step 7 — Thread terminates**
-`run()` returns (or throws uncaught exception). JVM marks thread as terminated. OS releases the thread's stack memory and scheduling resources.
+**Step 7** — Thread terminates. `run()` returns, JVM marks it terminated, OS frees the stack and resources.
 
-#### Important: `start()` vs `run()`
-```java
-t.start(); // CORRECT — creates new OS thread, runs run() on it
-        t.run();   // WRONG  — calls run() directly on current thread, no new thread created
-```
-This is a classic interview trap.
+---
+
+#### `start()` vs `run()` — Classic Interview Trap
+
+   ```java
+    t.start(); // CORRECT — new OS thread, run() executes on it
+    t.run();   // WRONG  — run() on current thread, no new thread
+   ```
+---
 
 #### How to Explain in Interview
-> "Thread.start() does several things under the hood. It validates the thread hasn't been started before. Then calls the native start0() method which asks the OS to create a new OS thread with its own stack. The new thread is placed in the OS run queue — it doesn't run immediately. When the OS scheduler assigns it a CPU core, JVM calls your run() method on the new thread's stack. Common mistake: calling run() directly just executes on the current thread — no new thread is created."
 
+> `Thread.start()` validates the thread hasn't been started, then calls the native `start0()` method in C. For a platform thread (pre Java 21), this asks the OS to create a new thread with its own stack — the thread lands in the OS run queue and waits for a CPU core. When scheduled, the JVM calls `run()`. In Java 21+, virtual threads skip this — the JVM parks and schedules them itself on a shared pool of OS threads, which is why you can have millions of them. Common mistake: calling `run()` directly just runs on the current thread — no new thread is created."
 ---
 
 ## Synchronization & Locks
@@ -2094,250 +2090,277 @@ At Cisco, our Flink pipeline had separate thread pools for CPU-heavy stream proc
 
 ### Q27. What are Virtual Threads — How are they different from platform threads
 
-Let me explain this from scratch, step by step.
+<img src="./img/java_thread_models.svg" width="800" height="800" />
 
----
-
-## Start From The Beginning — What is a Normal (Platform) Thread
+### Start from the beginning — what is a platform thread?
 
 When you write:
 
 ```java
-Thread t = new Thread(() -> {
-        System.out.println("hello");
-        });
-        t.start();
+Thread t = new Thread(() -> System.out.println("hello"));
+t.start();
 ```
 
-JVM goes to the **OS** and says: "Create me a thread."
+The JVM asks the **OS** to create a real thread. That OS thread gets its own ~1 MB stack and a slot in the OS scheduler. The JVM has zero control over when it runs — that's entirely the OS's job.
 
-OS creates a thread. This OS thread gets:
-- Its own stack (~1MB by default)
-- A slot in the OS thread scheduler
-
-This is called a **Platform Thread**. One Java thread = One OS thread. 1:1 mapping. Always.
+This is a **platform thread**. One Java thread = one OS thread. Always. 1:1 mapping.
 
 ```
-Java Platform Thread
-        ↕  (1:1 mapping)
-    OS Thread
-        ↕
-    CPU Core
+Java Thread
+    ↕  (1:1)
+ OS Thread
+    ↕
+ CPU Core
 ```
-
-The OS scheduler decides when this thread gets CPU time. The JVM has zero control over scheduling — it's fully the OS's job.
 
 ---
 
-## The Problem With Platform Threads
+### The problem with platform threads
 
-Platform threads are expensive because OS threads are expensive.
+Two costs make platform threads expensive at scale:
 
-The two costs:
+**Cost 1 — Memory.** Every thread gets ~1 MB of stack from the OS. Ten thousand threads = 10 GB of stack, most of it sitting idle waiting for I/O.
 
-**Cost 1 — Memory**
-Every platform thread gets ~1MB stack from OS. You create 10,000 threads = 10GB of stack memory. Most of that is just sitting idle waiting for I/O.
-
-**Cost 2 — Blocking wastes OS threads**
-
-This is the bigger problem. Imagine this:
+**Cost 2 — Blocking wastes OS threads.** This is the bigger problem:
 
 ```java
-// Thread calls a database
+// This thread calls a database and waits
 String result = database.query("SELECT ...");
-// Thread is now BLOCKED — waiting for DB to respond
-// Could be 10ms, 50ms, 200ms
-// During this entire wait — OS thread is doing NOTHING
-// But it's still alive, still consuming 1MB stack, still in OS scheduler
+// Could be 10ms, 50ms, 200ms...
+// During that entire wait — the OS thread is alive,
+// consuming 1 MB of stack, doing absolutely nothing.
 ```
 
 ```
-Platform Thread timeline:
-───working──►[BLOCKED: waiting for DB 50ms]──►working──►[BLOCKED: waiting for HTTP 100ms]──►
-              ↑                                           ↑
-         OS thread alive                           OS thread alive
-         consuming memory                          consuming memory
-         doing NOTHING                             doing NOTHING
+Platform thread timeline:
+──working──►[BLOCKED: waiting for DB 50ms]──►working──►[BLOCKED: waiting for HTTP 100ms]──►
+             ↑                                           ↑
+          OS thread alive                          OS thread alive
+          consuming memory                         consuming memory
+          doing NOTHING                            doing NOTHING
 ```
 
-For a service handling 10,000 concurrent requests where each request does DB calls — you need 10,000 platform threads — 10GB of stack memory — mostly sitting blocked doing nothing.
+A service handling 10,000 concurrent requests — each doing DB calls — needs 10,000 platform threads and ~10 GB of stack, mostly blocked and idle.
 
-This is why people moved to **Reactive programming** (WebFlux) — non-blocking I/O, don't waste threads on waiting. But reactive code is complex — callbacks, chain hell, hard to debug.
+This is why people moved to **reactive programming** (WebFlux, RxJava): non-blocking I/O, callbacks, don't waste threads on waiting. But reactive code is hard to write and harder to debug.
 
 **Virtual threads solve this without reactive complexity.**
 
 ---
 
-## Virtual Threads — The Idea
+### What are virtual threads?
 
-What if when a thread blocks on I/O — instead of wasting an OS thread — we just **pause that Java thread**, free up the OS thread for other work, and **resume the Java thread later** when I/O completes?
+Java 21 introduces **virtual threads**: lightweight Java objects managed entirely by the JVM, not OS threads. Their stack lives on the heap instead of OS-allocated memory — it starts at a few hundred bytes and grows as needed.
 
-That is exactly what virtual threads do.
+```java
+// Platform thread (before Java 21)
+Thread t = new Thread(() -> System.out.println("platform"));
+t.start();
+
+// Virtual thread (Java 21+)
+Thread t = Thread.ofVirtual().start(() -> System.out.println("virtual"));
+```
+
+The JVM runs virtual threads on top of a small fixed pool of real OS threads called **carrier threads**.
 
 ---
 
-## What is a Carrier Thread
-
-To understand carrier threads you need this picture:
+### The three types — side by side
 
 ```
 Virtual Threads (millions, managed by JVM)
-    VT-1  VT-2  VT-3  VT-4  VT-5  VT-6 ... VT-1000000
-      \    |    /       \    |    /
-       \   |   /         \   |   /
-     Carrier Thread 1   Carrier Thread 2   Carrier Thread 3   Carrier Thread 4
-     (Platform Thread)  (Platform Thread)  (Platform Thread)  (Platform Thread)
-          ↕                   ↕                   ↕                   ↕
-       OS Thread           OS Thread           OS Thread           OS Thread
-          ↕                   ↕                   ↕                   ↕
-       CPU Core 1          CPU Core 2          CPU Core 3          CPU Core 4
+  VT-1  VT-2  VT-3  VT-4  VT-5  VT-6 ... VT-1,000,000
+    \    |   /         \    |   /
+     \   |  /           \   |  /
+  Carrier Thread 1   Carrier Thread 2   Carrier Thread 3
+  (Platform Thread)  (Platform Thread)  (Platform Thread)
+         ↕                  ↕                  ↕
+      OS Thread          OS Thread          OS Thread
+         ↕                  ↕                  ↕
+      CPU Core 1         CPU Core 2         CPU Core 3
 ```
 
-**Carrier threads are just normal platform threads** — OS threads, 1:1 mapping with CPU cores. JVM creates a small fixed pool of them. Usually equal to number of CPU cores. These are the actual OS threads that do real CPU work.
-
-**Virtual threads are lightweight Java objects** — managed entirely by JVM. They are NOT OS threads. They live on the heap. Their stack is also on the heap (not fixed 1MB — starts small, grows as needed, ~few hundred bytes to a few KB).
-
-Virtual threads **mount** onto carrier threads to actually execute. When a virtual thread needs CPU — it gets assigned to a carrier thread. Carrier thread runs its code on a CPU core.
+| | Platform thread (= carrier thread when running VTs) | Virtual thread                            |
+|---|---|-------------------------------------------|
+| What it is | Java thread = OS thread, 1:1 | Lightweight Java object, NOT an OS thread |
+| Created by | JVM asks OS | JVM internally (you create these)         |
+| Stack | ~1 MB fixed, OS RAM | Few KB on heap, grows dynamically         |
+| Scheduled by | OS scheduler | JVM scheduler (ForkJoinPool)              |
+| How many | Thousands max (~10K practical) | Millions possible |
+| Blocks on I/O | OS thread sits idle |  Unmounted from carrier, saved to heap |
+| Available since | Always |  Java 21 (GA) |
 
 ---
 
-## The Magic — What Happens When Virtual Thread Blocks
+### What happens when a virtual thread blocks — step by step
 
 ```java
-// This code runs on a Virtual Thread
+// This code is running on a virtual thread
 String result = database.query("SELECT ...");
-// Virtual thread is about to block waiting for DB response
+// Virtual thread is about to block waiting for the DB response
 ```
 
 **Without virtual threads (platform thread):**
 ```
-Platform Thread blocks → OS thread sits idle for 50ms → wastes OS thread
+Platform thread blocks → OS thread sits idle for 50ms → wasted
 ```
 
 **With virtual threads:**
 ```
-Step 1: Virtual thread calls database.query()
-Step 2: JVM sees this is a blocking I/O call
-Step 3: JVM saves the virtual thread's entire state
-        (stack, local variables, where it was in execution)
-        → saves it to HEAP as a Java object
-Step 4: JVM UNMOUNTS the virtual thread from its carrier thread
-Step 5: Carrier thread is NOW FREE
-Step 6: JVM assigns a different virtual thread to this carrier thread
-        → carrier thread continues doing useful work
-Step 7: 50ms later — DB responds
-Step 8: JVM picks any available carrier thread
-Step 9: JVM MOUNTS the original virtual thread back onto carrier
-Step 10: Virtual thread resumes exactly where it left off
-         result = "DB response data"
+1. VT calls database.query()
+2. JVM detects this is a blocking I/O call
+3. JVM saves the VT's entire state (stack, local vars, position) → heap object (cheap)
+4. VT is UNMOUNTED from its carrier thread
+5. Carrier thread is now FREE — goes back to the ForkJoinPool work queue
+6. Carrier picks up a different VT and runs it
+7. 50ms later: DB responds, OS signals JVM
+8. JVM puts the original VT back into the ForkJoinPool work queue
+9. Any free carrier picks it up and mounts it
+10. VT resumes exactly where it left off: result = "DB response data"
 ```
 
 ```
 Carrier Thread 1 timeline:
-───[VT-1 running]──►[VT-1 blocks on DB]──►[VT-2 runs]──►[VT-3 runs]──►[VT-1 resumes]──►
-                     ↑
-              VT-1 unmounted
-              saved to heap
-              carrier continues
-              with other VTs
+──[VT-1 running]──►[VT-1 blocks on DB → unmounted]──►[VT-2 runs]──►[VT-3 runs]──►[VT-1 resumes]──►
 ```
 
-The carrier thread **never blocks**. It always has work to do. OS thread is never wasted.
+The carrier thread **never blocks**. It always has work to do.
 
 ---
 
-## Concrete Example — Side by Side
+### Concrete example: 1,000 concurrent DB calls
 
-### 1000 concurrent DB calls
-
-**With Platform Threads:**
+**With platform threads:**
 ```
-1000 requests → 1000 platform threads
-Each thread calls DB → blocks for 50ms
-1000 OS threads all sitting idle for 50ms
-Memory: 1000 × 1MB = 1GB stack memory
-OS scheduler managing 1000 threads
+1,000 requests → 1,000 platform threads
+Each blocks on DB for 50ms
+1,000 OS threads sitting idle
+Memory: 1,000 × 1 MB = 1 GB stack
 ```
 
-**With Virtual Threads:**
+**With virtual threads:**
 ```
-1000 requests → 1000 virtual threads
-Each virtual thread calls DB → JVM unmounts it
-Only 8 carrier threads (8 CPU cores)
-8 OS threads doing actual work
-Memory: 1000 × few KB = few MB heap memory
-1000 virtual threads saved as heap objects while waiting
-When DB responds → virtual thread remounted → continues
+1,000 requests → 1,000 virtual threads
+Each blocks on DB → JVM unmounts it → saves as heap object
+Only 8 carrier threads (for 8 CPU cores)
+8 OS threads doing real work
+Memory: 1,000 × few KB = a few MB heap
+When DB responds → VT re-queued → carrier picks it up → resumes
 ```
 
 ---
 
-## The Three Types — Side by Side
+### Three key mental model corrections
 
-```
-┌─────────────────┬──────────────────────┬──────────────────────┬──────────────────────┐
-│                 │   Platform Thread    │   Carrier Thread     │   Virtual Thread     │
-├─────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
-│ What it is      │ Java thread = OS     │ A platform thread    │ Lightweight Java     │
-│                 │ thread, 1:1 mapping  │ that runs virtual    │ object, managed by   │
-│                 │                      │ threads on top       │ JVM, NOT an OS thread│
-├─────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
-│ Created by      │ JVM asks OS          │ JVM internally       │ JVM internally       │
-│                 │                      │ (you don't create)   │ (you create these)   │
-├─────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
-│ Stack           │ ~1MB fixed, OS RAM   │ ~1MB fixed, OS RAM   │ Few KB, on heap,     │
-│                 │                      │                      │ grows dynamically    │
-├─────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
-│ Scheduled by    │ OS scheduler         │ OS scheduler         │ JVM scheduler        │
-├─────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
-│ How many        │ Thousands max        │ = CPU cores (8-32)   │ Millions possible    │
-│                 │ (~10K practical)     │ small fixed pool     │                      │
-├─────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
-│ Blocks on I/O   │ OS thread wastes     │ Never blocks —       │ Unmounted from       │
-│                 │ waiting              │ virtual thread       │ carrier, saved to    │
-│                 │                      │ unmounts instead     │ heap, carrier freed  │
-├─────────────────┼──────────────────────┼──────────────────────┼──────────────────────┤
-│ Available since │ Always               │ Java 21 (internal)   │ Java 21 (GA)         │
-└─────────────────┴──────────────────────┴──────────────────────┴──────────────────────┘
-```
+**Only one pool exists** — the `ForkJoinPool`, which holds carrier (OS) threads. Virtual threads are never pooled. They're created per task and discarded when done.
+
+**The carrier thread selects the virtual thread, not the other way around.** The carrier is the active worker. It finishes a VT (or the VT blocks), goes back to the work queue, and pulls the next one. The virtual thread is completely passive.
+
+**Parked ≠ queued.** When a virtual thread blocks, it's not sitting in any queue — it's just a heap object waiting for a callback. It only enters the work queue again when its I/O completes and the JVM puts it back in.
+
+**The OS knows nothing about virtual threads.** From the OS's perspective, only carrier threads exist. Virtual threads are entirely a JVM abstraction.
 
 ---
 
-## One Thing That Breaks Virtual Threads — Pinning
+### The one pitfall: pinning
 
-When a virtual thread hits a `synchronized` block — it gets **pinned** to its carrier thread. JVM cannot unmount it even if it blocks inside.
+When a virtual thread enters a `synchronized` block, it gets **pinned** to its carrier. The JVM cannot unmount it even if it blocks inside:
 
 ```java
 synchronized(this) {
-        String result = database.query(...); // blocks here
-        // virtual thread is PINNED to carrier
-        // carrier thread is also blocked
-        // defeats the purpose of virtual threads
-        }
+    String result = database.query(...); // VT blocks here
+    // VT is PINNED — carrier is also stuck
+    // defeats the purpose of virtual threads
+}
 ```
 
-Why? Because `synchronized` uses the Mark Word on the object — the actual OS thread identity is baked into the lock mechanism. JVM cannot swap OS threads while inside `synchronized`.
+Why? Because `synchronized` uses the object's Monitor, which bakes in the OS thread identity. The JVM can't swap OS threads while inside it.
 
 **Fix: use `ReentrantLock` instead**
 
 ```java
 lock.lock();
-        try {
-        String result = database.query(...); // virtual thread can unmount here
-        } finally {
-        lock.unlock();
-        }
+try {
+    String result = database.query(...); // VT can unmount freely here
+} finally {
+    lock.unlock();
+}
 ```
 
-`ReentrantLock` doesn't pin — JVM can freely unmount and remount the virtual thread.
+`ReentrantLock` doesn't pin — the JVM can freely unmount and remount the virtual thread around blocking calls.
 
 ---
 
-## How to Explain in Interview
+### `start()` vs `run()` — classic interview trap
 
-> "Platform threads are 1:1 with OS threads — expensive, limited to thousands. Carrier threads are just platform threads that the JVM uses internally as a fixed pool, sized to CPU cores — you never create them directly. Virtual threads are lightweight JVM-managed objects whose stack lives on the heap. They mount onto carrier threads to execute. When a virtual thread blocks on I/O, JVM saves its entire state to heap, unmounts it from the carrier, and the carrier immediately picks up another virtual thread. The carrier OS thread never blocks — it always has work. This lets you have millions of virtual threads with just a handful of carrier threads. The one pitfall is pinning — synchronized blocks prevent unmounting, so use ReentrantLock inside virtual thread code."
+```java
+t.start(); // CORRECT — new thread is created, run() executes on it
+t.run();   // WRONG  — run() called on the current thread, no new thread created
+```
 
+`Thread.start()` is a thin Java wrapper around `private native void start0()`, implemented in C inside the JVM. That's what triggers the OS thread creation (for platform threads) or JVM scheduler registration (for virtual threads).
 
+---
+
+## Interview summary
+
+> "Platform threads are 1:1 with OS threads — expensive and limited to thousands. Carrier threads are just platform threads that the JVM uses internally as a fixed pool, sized to CPU cores — you never create them directly. Virtual threads are lightweight JVM-managed objects whose stack lives on the heap. They mount onto carrier threads to execute. When a virtual thread blocks on I/O, the JVM saves its entire state to heap and unmounts it from the carrier — the carrier immediately picks up another virtual thread. The carrier OS thread never blocks. This lets you have millions of virtual threads with just a handful of OS threads. The one pitfall is pinning: `synchronized` blocks prevent unmounting, so use `ReentrantLock` inside virtual thread code that does I/O."
+
+---
+
+### 28A. ForkJoinPool.commonPool()
+
+A **shared, JVM-wide thread pool** designed for parallel, divide-and-conquer tasks.
+It uses a **work-stealing algorithm** — idle threads pick up tasks from busy threads to maximize CPU usage.
+
+- Available since Java 7, heavily used from Java 8+
+- Parallelism = number of CPU cores − 1 (by default)
+- Automatically used by parallel streams and CompletableFuture
+
+---
+
+## Basic Examples
+
+### 1. Parallel Stream (implicit use)
+```java
+List<Integer> numbers = List.of(1, 2, 3, 4, 5);
+
+int sum = numbers.parallelStream()
+                 .mapToInt(Integer::intValue)
+                 .sum();
+// commonPool() is used automatically under the hood
+```
+
+### 2. CompletableFuture (implicit use)
+```java
+CompletableFuture<String> future = CompletableFuture.supplyAsync(() -> {
+    return "Running in: " + Thread.currentThread().getName();
+});
+
+System.out.println(future.get());
+```
+
+### 3. Direct Submission (explicit use)
+```java
+ForkJoinPool pool = ForkJoinPool.commonPool();
+
+pool.submit(() -> {
+    System.out.println("Task in: " + Thread.currentThread().getName());
+}).get();
+```
+
+---
+
+## When to Use
+
+| Scenario              | Use commonPool? |
+|-----------------------|-----------------|
+| CPU-bound parallel work | ✅ Yes         |
+| Parallel streams        | ✅ Yes (auto)  |
+| I/O or blocking tasks   | ❌ No          |
+| DB / HTTP calls         | ❌ No          |
+
+> **Rule of thumb:** Use it for CPU work. For blocking tasks, always pass a custom `ExecutorService` to avoid starving the shared pool.
 ---
 
 ### Q28. What is CompletableFuture — How does it work

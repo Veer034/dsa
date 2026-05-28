@@ -60,14 +60,317 @@
         * It also destroys testability — mocking layers becomes harder, and transaction boundaries get muddled.
         * In code reviews at product companies, this is a structural red flag.
 
-    * **Follow-up (Senior): In a large microservice with 50+ beans, startup time becomes a concern. What strategies do you use to optimize Spring context startup time in production at companies like Flipkart or Razorpay?**
-        * **Lazy initialization globally:** `spring.main.lazy-initialization=true` — beans are only created when first needed, not at startup. Reduces startup time significantly but moves failures from startup to first-use.
-        * **`@Lazy` on specific heavy beans:** Apply selectively to beans with expensive constructors (DB connection pools, large caches) to defer their creation.
-        * **Spring Native / GraalVM AOT compilation:** Compiles the entire context ahead-of-time. Startup goes from seconds to milliseconds — critical for serverless/Lambda deployments.
-        * **`spring-context-indexer`:** Generates a `META-INF/spring.components` index at compile time — avoids classpath scanning at runtime. Add `spring-context-indexer` to the build, all `@Component`-annotated classes are pre-indexed.
-        * **Profiling startup:** Use `spring.jmx.enabled=false`, and `SpringApplicationRunListener` to measure per-phase startup time.
-        * **Production benchmark target:** Containerized microservices should start under 3s (Spring MVC) or under 800ms (Spring Native) for auto-scaling responsiveness.
+  * **Follow-up (Senior): In a large microservice with 50+ beans, startup time becomes a concern. What strategies do you use to optimize Spring context startup time in production at companies like Flipkart or Razorpay?**
 
+#### Strategy 1: Profile First — Never Optimize Blind
+
+Before applying any fix, measure where time is actually going.
+
+#### Spring Boot Actuator Startup Endpoint (Boot 2.4+)
+
+```java
+// In main class or configuration
+@Bean
+ApplicationStartup applicationStartup() {
+    return new BufferingApplicationStartup(2048); // buffer size for steps
+}
+```
+
+```yaml
+# application.yml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: startup
+```
+
+Hit `/actuator/startup` after boot — you get a precise timeline of every step: context refresh, bean instantiation, auto-configuration, component scanning. This tells you *exactly* what's slow before you guess.
+
+#### JVM-Level Profiling
+
+```bash
+# See which classes are loaded and when
+java -verbose:class -jar app.jar 2>&1 | grep "Loaded" | wc -l
+
+# Async profiler for wall-clock startup flame graph
+java -agentpath:/path/to/libasyncProfiler.so=start,event=wall,file=startup.html -jar app.jar
+```
+
+**Key insight:** Engineers who skip profiling often waste time enabling lazy init on beans that cost 2ms, while 
+missing a single **Flyway migration**(open-source database migration tool that helps you manage and version-control your database schema as it evolves) that costs 4 seconds.
+
+---
+
+#### Strategy 2: Lazy Initialization
+
+#### Global Lazy Init
+
+```yaml
+spring:
+  main:
+    lazy-initialization: true
+```
+
+All beans deferred until first use. Startup time drops significantly in services with 50+ beans — often 40–60% reduction. The trade-off is that failures surface at first-request time, not at startup. This makes readiness probes less meaningful.
+
+**Production nuance:** At Razorpay, payment services often cannot afford first-request latency on the critical path (checkout, charge). For those, global lazy init is dangerous. You'd use it only on internal tooling services or async workers.
+
+#### Selective `@Lazy` on Expensive Beans
+
+```java
+@Bean
+@Lazy
+public ConnectionPool heavyConnectionPool() {
+    // Expensive: creates 20 connections, validates schema
+    return new HikariPool(config);
+}
+
+@Bean
+@Lazy
+public LargeInMemoryCache productCatalogCache() {
+    // Expensive: loads 500k records from Redis on init
+    return new CatalogCache(redisTemplate);
+}
+```
+
+Apply to: DB connection pools beyond the primary one, large caches, third-party SDK clients (payment gateways, SMS providers), and scheduled job beans that aren't needed on the request path.
+
+---
+
+#### Strategy 3: Exclude Unused Auto-Configurations
+
+Spring Boot loads dozens of auto-configurations via `spring.factories` / `AutoConfiguration.imports`. Many are irrelevant to your service.
+
+```java
+@SpringBootApplication(exclude = {
+    DataSourceAutoConfiguration.class,       // if you manage DataSource manually
+    FlywayAutoConfiguration.class,           // if migrations run out-of-band
+    SecurityAutoConfiguration.class,         // if using custom security setup
+    JmxAutoConfiguration.class,              // almost always safe to exclude
+    TaskExecutionAutoConfiguration.class,    // if you define your own executor
+    WebMvcAutoConfiguration.class            // if using WebFlux
+})
+```
+
+Or in properties (preferred for environment-specific control):
+
+```yaml
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jmx.JmxAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+```
+
+**How to find candidates:** Run with `--debug` flag. Spring prints a "CONDITIONS EVALUATION REPORT" showing every auto-config that was evaluated, matched, or skipped. The ones that matched but aren't needed are your targets.
+
+Disabling JMX alone (`spring.jmx.enabled=false`) saves ~150–200ms in most Spring Boot 2.x services.
+
+---
+
+#### Strategy 4: Narrow Component Scan Scope
+
+Default: Spring scans the entire classpath from your `@SpringBootApplication` package down.
+
+```java
+// ❌ Scans everything under com.razorpay — hits 300+ classes including test utilities
+@SpringBootApplication  // scans com.razorpay.*
+
+// ✅ Scans only the packages that actually contain beans
+@SpringBootApplication(scanBasePackages = {
+    "com.razorpay.payment.service",
+    "com.razorpay.payment.repository",
+    "com.razorpay.payment.config"
+})
+```
+
+Or use the compile-time indexer (see Strategy 5) to eliminate scanning entirely.
+
+---
+
+#### Strategy 5: Spring Context Indexer (Compile-Time Component Index)
+
+Add to `pom.xml`:
+
+```xml
+<dependency>
+    <groupId>org.springframework</groupId>
+    <artifactId>spring-context-indexer</artifactId>
+    <optional>true</optional>
+</dependency>
+```
+
+At compile time, the annotation processor generates `META-INF/spring.components` — a pre-built index of all `@Component`-annotated classes. At runtime, Spring reads this file instead of scanning the classpath.
+
+Effect: eliminates classpath scanning overhead entirely. In a fat JAR with 1000+ classes, this can save 300–700ms.
+
+**Gotcha:** If you have multiple JARs (modular monorepo setup), each module must be compiled with the indexer. If any module is missing the index, Spring falls back to full scanning for that module.
+
+---
+
+#### Strategy 6: Spring Boot 3.x AOT Processing (Without GraalVM)
+
+Spring Boot 3.0+ ships with AOT (ahead-of-time) processing built into the Maven/Gradle plugin. Even without compiling to a native image, AOT reduces runtime reflection and proxy generation.
+
+```xml
+<!-- pom.xml: already in spring-boot-maven-plugin -->
+<plugin>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-maven-plugin</artifactId>
+    <executions>
+        <execution>
+            <goals>
+                <goal>process-aot</goal>  <!-- generates AOT sources at build time -->
+            </goals>
+        </execution>
+    </executions>
+</plugin>
+```
+
+Run with:
+
+```bash
+java -Dspring.aot.enabled=true -jar app.jar
+```
+
+Spring skips CGLIB proxy generation and component scanning at startup; it uses pre-generated code instead. This is the most impactful Boot 3.x optimization for JVM (non-native) deployments.
+
+---
+
+#### Strategy 7: GraalVM Native Image (Spring Native)
+
+Compiles the entire Spring application to a native binary. Startup time drops from 3–8s to 50–300ms. Memory footprint is also 3–5x smaller.
+
+```xml
+<!-- Boot 3.x native support is built-in -->
+<plugin>
+    <groupId>org.graalvm.buildtools</groupId>
+    <artifactId>native-maven-plugin</artifactId>
+</plugin>
+```
+
+```bash
+mvn -Pnative native:compile
+./target/my-service  # starts in ~150ms
+```
+
+#### Trade-offs — critical to mention in interviews
+
+| Concern | Detail |
+|---|---|
+| Build time | Native compilation takes 2–8 minutes vs 30s for JVM |
+| No dynamic class loading | All reflection, proxies, serialization must be declared at build time via `reflect-config.json` |
+| No runtime JIT | Peak throughput is lower than a warmed-up JVM (15–30% in some workloads) |
+| Debugging | Stack traces are harder to interpret; no JVMTI agents |
+| Library compatibility | Third-party libraries that use reflection heavily (older Hibernate versions, certain serializers) need hints or patches |
+
+**When to use:** Lambda/serverless functions, CLI tools, and services where cold start SLAs are under 500ms. For high-throughput payment APIs at Razorpay that run 24/7 on warm JVMs, native images are often *not* the right choice — the JIT's profile-guided optimization gives better steady-state throughput.
+
+---
+
+#### Strategy 8: Virtual Threads (Spring Boot 3.2+ / Java 21)
+
+Not a startup optimization, but frequently conflated with it in interviews. Virtual threads don't reduce startup time — they change the threading model to improve throughput under I/O-heavy load.
+
+```yaml
+spring:
+  threads:
+    virtual:
+      enabled: true  # Boot 3.2+, requires Java 21
+```
+
+With virtual threads, you can sustain 10,000 concurrent requests on a service that previously needed 200 platform threads. This reduces the *need* for aggressive auto-scaling (and thus reduces how often cold starts happen in practice).
+
+**Mention this in interviews** to show awareness that startup time is one dimension of the scaling problem — not the only one.
+
+---
+
+#### Strategy 9: Database Migration Optimization
+
+Flyway/Liquibase running at startup is one of the most common hidden startup costs — and often the largest single contributor.
+
+```yaml
+# Option 1: Run migrations out-of-band (CI/CD pipeline) not in the app
+spring:
+  flyway:
+    enabled: false  # App assumes DB is already migrated
+
+# Option 2: Separate migration job/init container
+# k8s init container runs: flyway migrate
+# Main container starts after init container exits
+```
+
+In a microservice with 200 migrations, Flyway can take 3–10 seconds on startup (checksumming all scripts, validating applied versions). Moving this to an init container or CI step is one of the highest-impact changes with zero code changes in the app itself.
+
+---
+
+#### Strategy 10: Class Data Sharing (CDS) and AppCDS
+
+Available in all modern JDKs, no library changes needed.
+
+```bash
+# Step 1: Generate a class list during a training run
+java -Xshare:off -XX:DumpLoadedClassList=app.classlist -jar app.jar
+
+# Step 2: Create a shared archive
+java -Xshare:dump -XX:SharedClassListFile=app.classlist \
+     -XX:SharedArchiveFile=app.jsa -jar app.jar
+
+# Step 3: Use the archive in production
+java -Xshare:on -XX:SharedArchiveFile=app.jsa -jar app.jar
+```
+
+CDS pre-loads and memory-maps class metadata. For a Spring Boot app, this saves 300–600ms by avoiding repeated class parsing across pod restarts. It's especially effective in Kubernetes where many pod replicas start from the same image — the mapped memory pages can be shared across containers on the same node.
+
+**AppCDS (Application Class Data Sharing)** extends this to application classes (not just JDK classes), giving further gains. Spring Boot's Docker image builder (`bootBuildImage`) can pre-generate the CDS archive during image build.
+
+---
+
+#### Production Decision Framework
+
+```
+Is startup time > 5s?
+├── YES → Profile first (Actuator /startup endpoint)
+│         ├── Flyway/migrations > 2s? → Move to init container
+│         ├── Component scan > 1s?   → Add spring-context-indexer
+│         └── Bean instantiation?    → @Lazy on top offenders
+│
+├── 2–5s → Quick wins
+│         ├── spring.jmx.enabled=false
+│         ├── Exclude unused auto-configs
+│         ├── Narrow @ComponentScan scope
+│         └── Enable CDS/AppCDS
+│
+└── < 2s → Deployment pattern matters more than app changes
+          ├── Keep one warm replica (min replicas = 1)
+          ├── Tune Kubernetes readiness probe delays
+          └── Consider pre-warming with scheduled scale-up before traffic spikes
+```
+
+---
+
+## Benchmark Targets (Production Reference)
+
+| Deployment Type | Target Startup | Notes |
+|---|---|---|
+| Spring MVC, JVM, no DB migrations | < 2s | Achievable with indexer + exclude unused configs |
+| Spring MVC, JVM, with Flyway | < 4s | Move Flyway to init container for < 2s |
+| Spring Boot 3 + AOT (JVM) | < 1.5s | With `spring.aot.enabled=true` |
+| Spring Native (GraalVM) | < 300ms | At cost of build complexity |
+| AWS Lambda (SnapStart) | < 500ms | JVM snapshot, no native image needed |
+
+---
+
+#### What Separates a Senior Answer
+
+A junior answer lists lazy init and GraalVM. A senior answer:
+
+1. **Starts with profiling** — no optimization without measurement
+2. **Differentiates startup vs. throughput** — virtual threads, JIT warmup are separate concerns
+3. **Knows the trade-offs** — GraalVM native isn't free; lazy init moves failures
+4. **Thinks in deployment terms** — CDS, init containers, min replica counts are often more impactful than code changes
+5. **Ties it to business context** — why Razorpay's payment API has different constraints than a Flipkart batch job service
 
 ---
 * [x] **What is spring AOP?**
@@ -112,31 +415,28 @@
 
     * **Follow-up (Senior): When does Spring choose JDK Dynamic Proxy vs CGLIB, and what breaks if your bean class is `final`?**
         * Spring uses JDK Dynamic Proxy when the bean implements at least one interface. It uses CGLIB when the bean has no interface or when `proxyTargetClass = true` is forced.
-        * CGLIB creates a subclass of your bean at runtime. If the class is `final`, CGLIB cannot subclass it → `Cannot subclass final class` exception at startup.
+        * CGLIB creates subclasses your bean class at runtime. If Spring needs to CGLIB-proxy a final class — 
+          because it has no interface, proxyTargetClass=true is set, or it's a @Configuration class — it will throw Cannot subclass final class at startup. If the bean implements an interface and JDK dynamic proxying is used instead, final is not a problem.
         * **Practical rule:** Don't make Spring-managed `@Service`/`@Component` classes or their AOP-advised methods `final`. Kotlin's `all-open` plugin exists specifically for this reason.
-
-    * **Follow-up (Senior): You need to implement distributed tracing (adding a correlation/trace ID to every log line) across 13 microservices without touching every service's business code. How do you implement this with Spring AOP + MDC, and what are the limitations?**
-        * Define a `@Around` aspect on all controllers (or use a `OncePerRequestFilter`) that: extracts the `X-Correlation-ID` header (or generates a UUID if absent), puts it into `MDC.put("traceId", id)`, proceeds with the method, then clears MDC in a `finally` block.
-        * Spring AOP propagates the advice to all matching beans automatically — no business code changes needed.
-        ```java
-        @Aspect
-        @Component
-        public class CorrelationIdAspect {
-            @Around("execution(* com.company.*.controller.*.*(..))")
-            public Object injectTraceId(ProceedingJoinPoint pjp) throws Throwable {
-                String traceId = UUID.randomUUID().toString();
-                MDC.put("traceId", traceId);
-                try {
-                    return pjp.proceed();
-                } finally {
-                    MDC.clear(); // critical — prevent MDC leakage to pooled threads
-                }
-            }
-        }
-        ```
-        * **Limitations:** MDC uses `ThreadLocal` — breaks with async (`@Async`) and reactive (WebFlux). For WebFlux, use Reactor Context and `Hooks.onEachOperator` to propagate MDC. For async, use `DelegatingSecurityContextAsyncTaskExecutor` pattern with MDC copy.
-        * **At scale:** Use Spring Cloud Sleuth (or Micrometer Tracing in Boot 3.x) which handles all these propagation scenarios automatically and integrates with Zipkin/Jaeger.
-
+    ```
+      // ✅ Fine even if UserServiceImpl is final — JDK proxy wraps the interface
+    @Service
+    public final class UserServiceImpl implements UserService { }
+    
+    // ❌ Boom — no interface, Spring must CGLIB-proxy, can't subclass final
+    @Service
+    public final class PaymentProcessor { }
+    
+    // ❌ Also boom — forced CGLIB even though interface exists
+    @EnableAspectJAutoProxy(proxyTargetClass = true)
+    public final class UserServiceImpl implements UserService { }
+  
+    // ❌ This breaks for a different reason — @Configuration classes are ALWAYS
+    // CGLIB-proxied to intercept @Bean method calls and enforce singleton semantics
+    @Configuration
+    public final class AppConfig { }
+   ```
+  
     * **Follow-up (Senior): How do you write a custom `@Around` advice that measures method execution time and logs a warning if it exceeds an SLA threshold — without hardcoding the threshold per method?**
         * Create a custom annotation that carries the SLA as metadata:
         ```java
@@ -188,33 +488,306 @@
 
 ---
 * [x] **Explain bean scopes (Singleton, Prototype, Request, Session)**
-    * **Singleton (default)** - One instance per Spring container, shared across the application.
-    * **Prototype** - New instance created every time the bean is requested.
-    * **Request** - One instance per HTTP request (web applications only).
-    * **Session** - One instance per HTTP session (web applications only).
 
-    * **Follow-up (Senior): What happens when you inject a Prototype-scoped bean into a Singleton? What is the bug and how do you fix it?**
-        * The singleton is created once. Spring injects the prototype at construction time — that same instance is reused forever. The "prototype" effectively becomes a singleton. This is a scope mismatch bug.
-        * **Fixes:**
-            1. **`ObjectProvider<T>`** — inject `ObjectProvider<MyPrototype>` and call `.getObject()` each time. Modern and clean.
-            2. **`@Lookup`** — Spring overrides the method via CGLIB to return a fresh prototype per call. Declarative and Spring-idiomatic.
-            3. **`ApplicationContext.getBean()`** — programmatic lookup. Works but couples your code to the Spring API.
-        ```java
-        // ✅ Using ObjectProvider (recommended)
-        @Service
-        @RequiredArgsConstructor
-        public class ReportService {
-            private final ObjectProvider<ReportContext> contextProvider;
+### Singleton — The Full Truth
 
-            public void generate() {
-                ReportContext ctx = contextProvider.getObject(); // fresh instance every call
-            }
-        }
-        ```
+#### What Spring Guarantees
 
-    * **Follow-up (Senior): In a high-traffic system (e.g., 5M requests/hour like Zee5), using Prototype scope carelessly can cause a GC pressure problem. Why?**
-        * Every injection/call creates a new object. If the prototype holds heavy resources (large buffers, DB connections) and lives beyond the request, GC must collect all of them. At 5M requests/hour, thousands of unreferenced prototype instances pile up per second, causing frequent minor GC pauses and eventually major GC events, increasing p99 latency.
-        * **Rule:** Keep prototypes small and stateless. For heavy stateful objects, use a pool (e.g., Apache Commons Pool) instead of prototype scope.
+One **logical** instance per `ApplicationContext`. Same reference (`==`) every time.
+
+```java
+ApplicationContext ctx = new AnnotationConfigApplicationContext(AppConfig.class);
+
+MyService a = ctx.getBean(MyService.class);
+MyService b = ctx.getBean(MyService.class);
+
+System.out.println(a == b); // true — same reference, same object
+```
+
+#### What Spring Does NOT Guarantee
+
+A single **physical copy in memory**. The JVM creates multiple internal copies for its own performance needs. Spring has no control over this.
+
+---
+
+### Why "One Instance" Is a Lie at the JVM Level
+
+#### 1. JIT + Escape Analysis → Stack Allocation / Scalar Replacement
+
+The JVM's JIT compiler watches your running code. When it sees a hot method, it compiles it to native machine code and applies optimizations — one of which is **escape analysis**.
+
+**Escape analysis** asks: *does this object ever leave the method it was created in?*
+
+```java
+// Does 'p' escape this method?
+public int calculate() {
+    Point p = new Point(3, 4);  // created here
+    return p.x + p.y;           // used here, never passed out
+}
+// Answer: NO — p never escapes
+```
+
+If the object doesn't escape, the JIT has two options:
+
+**Option A — Stack allocate it**
+
+Instead of putting `p` on the heap (where GC manages it), the JIT puts it on the **call stack** — private to this thread, automatically gone when the method returns. No GC needed.
+
+```
+Normal flow:     new Point()  →  heap  →  GC collects later
+Stack-allocated: new Point()  →  stack →  gone when method returns (free, instant)
+```
+
+**Option B — Scalar replace it (more aggressive)**
+
+The JIT dissolves the object entirely. It never creates `Point` at all — it just uses the raw field values directly as local variables in CPU registers.
+
+```java
+// You wrote:
+Point p = new Point(3, 4);
+return p.x + p.y;
+
+// JIT actually executes (no Point object is ever created):
+int p_x = 3;
+int p_y = 4;
+return p_x + p_y;
+// p_x and p_y live in CPU registers — fastest memory possible
+```
+
+**What this means for singleton:** Even your singleton bean — which Spring "guarantees" is one instance — may be scalar-replaced inside a hot method. The JVM is running code that has no object at all, just raw values in registers. Spring's "one instance" guarantee is invisible to the JIT.
+
+---
+
+#### 2. CPU Cache Coherence — Multiple Cores, Multiple Copies
+
+Modern CPUs have multiple cores, each with their own L1/L2 cache. When a thread reads an object's field, the CPU caches that value locally. Another thread on another core may have a *different cached copy* of the same field.
+
+```java
+@Service  // singleton — one Spring instance
+public class CounterService {
+    private int count = 0;  // one field, but potentially N cached copies (one per CPU core)
+
+    public void increment() { count++; }
+    public int get()        { return count; }
+}
+```
+
+```
+Core 1 cache: count = 5   ← Thread A reads this
+Core 2 cache: count = 3   ← Thread B reads this
+Actual RAM:   count = 5
+```
+
+Thread B is reading a stale copy. There is physically one `CounterService` object in heap memory, but its field value exists in multiple physical locations simultaneously (RAM + each core's cache).
+
+**Fix — `volatile` forces cache flush on every read/write:**
+
+```java
+private volatile int count = 0;
+// Now every read goes to RAM, every write flushes all caches
+// Physically one copy, logically consistent
+```
+
+**Or use `AtomicInteger` for read-modify-write atomicity:**
+
+```java
+private final AtomicInteger count = new AtomicInteger(0);
+public void increment() { count.incrementAndGet(); } // atomic, cache-coherent
+public int get()        { return count.get(); }
+```
+
+---
+
+#### 3. GC Copying (G1, ZGC) — Two Copies During Collection
+
+G1 and ZGC are **copying collectors**. When GC runs, it:
+1. Copies live objects from the old region to a new region
+2. Updates all references to point to the new location
+3. Discards the old region
+
+During step 1→2, **two physical copies exist simultaneously**:
+
+```
+Before GC:  [MyService @ 0x1000]  ← all references point here
+
+During GC:  [MyService @ 0x1000]  (old, being discarded)
+            [MyService @ 0x2F00]  (new copy, being written)
+
+After GC:   [MyService @ 0x2F00]  ← all references updated here
+            0x1000 is reclaimed
+```
+
+Spring still returns the same logical reference (now pointing to `0x2F00`), but the object physically moved. Two copies existed mid-collection.
+
+ZGC does this concurrently while your application is running — the "two copies" phase happens while your threads are actively calling methods on the bean.
+
+---
+
+#### 4. GraalVM AOT — Cloning for Specialization
+
+When compiled with GraalVM's AOT (Ahead-Of-Time) compiler, the compiler may **clone and specialize** objects — creating multiple compiled versions of the same class, each optimized for a specific call site. Multiple physical representations of your "singleton" class exist in the compiled binary.
+
+---
+
+## Spring Singleton vs GoF Singleton
+
+| | Spring Singleton | GoF Singleton |
+|---|---|---|
+| Scope | Per `ApplicationContext` | Per classloader / JVM |
+| Enforcement | Container manages the reference | Private constructor + static field |
+| Block `new MyBean()`? | No — anyone can call `new` | Yes — constructor is private |
+| Multiple instances possible? | Yes — two contexts, two instances | No |
+
+```java
+// Spring singleton — two contexts = two instances
+ApplicationContext ctx1 = new AnnotationConfigApplicationContext(AppConfig.class);
+ApplicationContext ctx2 = new AnnotationConfigApplicationContext(AppConfig.class);
+
+MyService s1 = ctx1.getBean(MyService.class);
+MyService s2 = ctx2.getBean(MyService.class);
+System.out.println(s1 == s2); // false
+
+// GoF singleton — constructor is private, only one instance ever
+public class GoFSingleton {
+    private static final GoFSingleton INSTANCE = new GoFSingleton();
+    private GoFSingleton() {}  // blocked — no one can call new
+    public static GoFSingleton getInstance() { return INSTANCE; }
+}
+```
+
+> **The correct framing:** Spring singleton is a *container-scoped reference contract*. GoF singleton is a *JVM-scoped construction contract*. Neither prevents the JVM from doing whatever it wants with physical memory.
+
+---
+
+### Prototype Scope
+
+New instance created each time the bean is requested. Spring creates it and hands it off — `@PreDestroy` / destroy lifecycle is **not called** by Spring after handoff.
+
+#### The Scope Mismatch Bug
+
+Injecting a prototype into a singleton — the prototype is created once at startup and reused forever.
+
+```java
+// ❌ Bug
+@Component
+@Scope("prototype")
+public class ReportContext {
+    private List<String> rows = new ArrayList<>(); // stateful — meant to be fresh each time
+}
+
+@Service
+public class ReportService {
+    private final ReportContext ctx; // injected once at startup
+
+    public ReportService(ReportContext ctx) {
+        this.ctx = ctx; // this same instance used for ALL requests forever
+    }
+
+    public void generate() {
+        ctx.rows.add("new row"); // rows keep growing across all calls — bug
+    }
+}
+```
+
+**Fix 1 — `ObjectProvider<T>` (recommended)**
+
+```java
+@Service
+@RequiredArgsConstructor
+public class ReportService {
+    private final ObjectProvider<ReportContext> contextProvider;
+
+    public void generate() {
+        ReportContext ctx = contextProvider.getObject(); // truly fresh every call
+        ctx.rows.add("new row"); // safe — this ctx is used only here
+    }
+}
+```
+
+**Fix 2 — `@Lookup` (declarative CGLIB override)**
+
+Spring subclasses your class via CGLIB and overrides the annotated method to call `getBean()` internally. Class cannot be `final`.
+
+```java
+@Service
+public abstract class ReportService {
+
+    public void generate() {
+        ReportContext ctx = createContext(); // CGLIB intercepts → returns fresh prototype
+        ctx.rows.add("new row");
+    }
+
+    @Lookup
+    protected abstract ReportContext createContext(); // Spring implements this
+}
+```
+
+**Fix 3 — `ApplicationContext.getBean()` (avoid)**
+
+```java
+@Service
+public class ReportService {
+    @Autowired
+    private ApplicationContext ctx; // Spring API leaking into business code
+
+    public void generate() {
+        ReportContext context = ctx.getBean(ReportContext.class);
+    }
+}
+```
+
+Works but tightly couples your code to Spring. Use only in infrastructure or legacy code.
+
+---
+
+#### GC Pressure with Prototype at Scale
+
+Every `getObject()` allocates a new heap object. At 5M req/hour (~1,400 req/sec):
+
+```
+1,400 new objects/sec × 10KB each = ~14MB/sec allocation rate
+```
+
+Short-lived prototypes are collected in **minor GC** (fast, < 5ms pause). The danger is **reference escape**:
+
+```java
+// ❌ Prototype escapes — survives into old-gen
+public class ReportService {
+    private List<ReportContext> archive = new ArrayList<>(); // long-lived list
+
+    public void generate() {
+        ReportContext ctx = contextProvider.getObject();
+        archive.add(ctx); // ctx escapes — now lives as long as ReportService (forever)
+    }
+}
+// Result: thousands of ReportContext instances in old-gen → major GC → p99 latency spike
+```
+
+```java
+// ✅ Prototype stays local — collected in minor GC
+public void generate() {
+    ReportContext ctx = contextProvider.getObject();
+    // use ctx
+    // method returns → ctx is unreachable → collected next minor GC
+}
+```
+
+For heavy objects that can't be short-lived, use an **object pool** instead:
+
+```java
+// Apache Commons Pool — reuse expensive objects instead of allocating new ones
+GenericObjectPool<ReportContext> pool = new GenericObjectPool<>(factory);
+
+public void generate() throws Exception {
+    ReportContext ctx = pool.borrowObject();
+    try {
+        // use ctx
+    } finally {
+        pool.returnObject(ctx); // returned to pool, not GC'd
+    }
+}
+```
+
 
 
 ---
@@ -224,89 +797,102 @@
     ↓
     Dependency Injection
     ↓
-    setBeanName
+    setBeanName                         (BeanNameAware)
     ↓
-    setBeanFactory
+    setBeanFactory                      (BeanFactoryAware)
     ↓
-    setApplicationContext
+    setApplicationContext               (ApplicationContextAware)
     ↓
-    @PostConstruct
+    postProcessBeforeInitialization     (BeanPostProcessor)
     ↓
-    afterPropertiesSet
+    @PostConstruct                      (CommonAnnotationBeanPostProcessor detects this)
+    ↓
+    afterPropertiesSet                  (InitializingBean)
+    ↓
+    initMethod                          (@Bean(initMethod="..."))
+    ↓
+    postProcessAfterInitialization      (BeanPostProcessor — AOP proxy swap happens here)
     ↓
     Bean Ready
     ↓
     @PreDestroy
     ↓
-    destroy()
+    destroy()                           (DisposableBean)
+    ↓
+    destroyMethod                       (@Bean(destroyMethod="..."))
   
   ------------
-    @Component
-    public class OrderService implements
-    BeanNameAware,
-    BeanFactoryAware,
-    ApplicationContextAware,
-    InitializingBean,
-    DisposableBean {
+   @Component
+   public class OrderService implements
+      BeanNameAware,
+      BeanFactoryAware,
+      ApplicationContextAware,
+      InitializingBean,
+      DisposableBean {
 
-    private String beanName;
+      private String beanName;
 
-    // 1. Instantiation
-    public OrderService() {
-        System.out.println("1. Constructor called");
-    }
+      // 1. Instantiation
+      public OrderService() {
+          System.out.println("1. Constructor called");
+      }
 
-    // 2. Populate properties
-    @Autowired
-    public void setDependency(PaymentService ps) {
-        System.out.println("2. Properties populated");
-    }
+      // 2. Populate properties
+      @Autowired
+      public void setDependency(PaymentService ps) {
+          System.out.println("2. Properties populated");
+      }
 
-    // 3. setBeanName
-    @Override
-    public void setBeanName(String name) {
-        this.beanName = name;
-        System.out.println("3. setBeanName: " + name);
-    }
+      // 3. setBeanName
+      @Override
+      public void setBeanName(String name) {
+          this.beanName = name;
+          System.out.println("3. setBeanName: " + name);
+      }
 
-    // 4. setBeanFactory
-    @Override
-    public void setBeanFactory(BeanFactory beanFactory) {
-        System.out.println("4. setBeanFactory");
-    }
+      // 4. setBeanFactory
+      @Override
+      public void setBeanFactory(BeanFactory beanFactory) {
+          System.out.println("4. setBeanFactory");
+      }
 
-    // 5. setApplicationContext
-    @Override
-    public void setApplicationContext(ApplicationContext ctx) {
-        System.out.println("5. setApplicationContext");
-    }
+      // 5. setApplicationContext
+      @Override
+      public void setApplicationContext(ApplicationContext ctx) {
+          System.out.println("5. setApplicationContext");
+      }
 
-    // 6a. @PostConstruct
-    @PostConstruct
-    public void postConstruct() {
-        System.out.println("6. @PostConstruct");
-    }
+      // 6. postProcessBeforeInitialization — runs via BeanPostProcessor (external class)
 
-    // 6b. afterPropertiesSet
-    @Override
-    public void afterPropertiesSet() {
-        System.out.println("7. afterPropertiesSet");
-    }
+      // 7. @PostConstruct — detected by CommonAnnotationBeanPostProcessor
+      @PostConstruct
+      public void postConstruct() {
+          System.out.println("7. @PostConstruct");
+      }
 
-    // ---- Bean Ready ----
+      // 8. afterPropertiesSet
+      @Override
+      public void afterPropertiesSet() {
+          System.out.println("8. afterPropertiesSet");
+      }
 
-    // 8a. @PreDestroy
-    @PreDestroy
-    public void preDestroy() {
-        System.out.println("8. @PreDestroy");
-    }
+      // 9. postProcessAfterInitialization — runs via BeanPostProcessor (external class)
+      //    AOP proxies (@Transactional, @Cacheable) are swapped in here
 
-    // 8b. destroy
-    @Override
-    public void destroy() {
-        System.out.println("9. destroy()");
-    }
-  }
+      // ---- Bean Ready ----
+
+      // 10. @PreDestroy
+      @PreDestroy
+      public void preDestroy() {
+          System.out.println("10. @PreDestroy");
+      }
+
+      // 11. destroy()
+      @Override
+      public void destroy() {
+          System.out.println("11. destroy()");
+      }
+     }
 
   ```
   | Aspect                            | `BeanFactory`           | `ApplicationContext`          |
@@ -331,31 +917,82 @@
         * **If you throw inside `@PostConstruct`**, the context fails to start — useful for fail-fast validation. If you throw inside a Runner, the app exits — same effect but at a later, safer stage.
         * **Multiple runners** — implement `Ordered` or use `@Order(1)` to control execution sequence.
 
-    * **Follow-up (Senior): What is a `BeanPostProcessor` and how does Spring use it internally for features like `@Autowired`, AOP proxying, and `@Scheduled`?**
-        * `BeanPostProcessor` has two callback methods: `postProcessBeforeInitialization` (called before `@PostConstruct`) and `postProcessAfterInitialization` (called after). Spring's own infrastructure hooks in here.
-        * `AutowiredAnnotationBeanPostProcessor` — scans `@Autowired` fields and injects dependencies.
-        * `AnnotationAwareAspectJAutoProxyCreator` — wraps beans in CGLIB/JDK proxies to apply AOP advice (`@Transactional`, `@Cacheable`, `@CircuitBreaker`).
-        * `ScheduledAnnotationBeanPostProcessor` — detects `@Scheduled` methods and registers them with the task scheduler.
-        * **Why it matters in interviews:** Understanding this explains *why* `@Transactional` on a `private` method doesn't work — the `BeanPostProcessor` creates a proxy of the class, and private methods are not visible to subclasses/proxies.
+    * **Follow-up (Senior): What is a `BeanPostProcessor` and how does Spring use it internally?**
+      * Two callback methods: `postProcessBeforeInitialization` (before `@PostConstruct`) and `postProcessAfterInitialization` (after `afterPropertiesSet`).
+      
+      | BeanPostProcessor | What it handles |
+      |---|---|
+      | `AutowiredAnnotationBeanPostProcessor` | `@Autowired`, `@Value`, `@Inject` |
+      | `CommonAnnotationBeanPostProcessor` | `@PostConstruct`, `@PreDestroy`, `@Resource` |
+      | `AnnotationAwareAspectJAutoProxyCreator` | AOP proxies — `@Transactional`, `@Cacheable`, `@Async` |
+      | `ScheduledAnnotationBeanPostProcessor` | `@Scheduled` registration |
+      | `PersistenceAnnotationBeanPostProcessor` | `@PersistenceContext`, `@PersistenceUnit` |
+      
+      * **`BeanPostProcessor` vs `BeanFactoryPostProcessor`** — commonly confused in interviews:
+      * `BeanFactoryPostProcessor` — runs before any bean is instantiated, operates on bean *definitions*. Example: `PropertySourcesPlaceholderConfigurer` resolves `@Value` placeholders.
+      * `BeanPostProcessor` — runs after each bean is instantiated, operates on bean *instances*.
+  
 
-    * **Follow-up (Senior): You have a `@Scheduled` task that runs every minute and makes a DB call. In production under Kubernetes with 5 replicas, the task runs 5 times per minute — causing duplicate processing. How do you solve distributed scheduling in Spring Boot?**
-        * The root problem: Spring's `@Scheduled` is JVM-local — every instance runs independently with no coordination.
-        * **Solution 1 — ShedLock:** Annotate the method with `@SchedulerLock(name = "myTask", lockAtLeastFor = "50s", lockAtMostFor = "1m")`. ShedLock creates a lock record in a shared DB table (or Redis). Only the pod that acquires the lock executes; others skip.
-        ```java
-        @Scheduled(fixedRate = 60_000)
-        @SchedulerLock(name = "dailyReportTask", lockAtMostFor = "55s")
-        public void generateDailyReport() { ... }
-        ```
-        * **Solution 2 — Quartz Clustered Scheduler:** Replace `@Scheduled` with Quartz Jobs backed by a shared DB (JDBC JobStore). Quartz handles leader election natively. Heavier setup but feature-rich (job history, misfire handling, pausing jobs).
-        * **Solution 3 — Kubernetes CronJob:** Move the scheduled task to a separate K8s CronJob that spins up exactly one pod. No leader election needed — architectural separation instead.
-        * **Preferred for most teams:** ShedLock with Redis — minimal code change, no extra infrastructure, works with existing Spring `@Scheduled`.
+  * **Why `@Transactional` silently fails — all cases:**
+      ```java
+      @Service
+      public class OrderService {
 
-    * **Follow-up (Senior): A `@PreDestroy` method in your service is supposed to drain an in-flight queue before shutdown. In Kubernetes, it sometimes doesn't execute. Why, and how do you guarantee graceful shutdown?**
-        * Kubernetes sends `SIGTERM` to the container. The JVM receives it and begins shutdown — `@PreDestroy` hooks fire. **But** Kubernetes also stops sending traffic to the pod (removes from Service endpoints) ~2-3 seconds *after* `SIGTERM`, not before. So requests in-flight when `SIGTERM` arrives get `Connection Refused`.
-        * **Fix — `preStop` hook:** Configure a Kubernetes `lifecycle.preStop` sleep (e.g., `sleep 10`) — this delays `SIGTERM` by 10s after the pod is removed from the load balancer, allowing in-flight requests to drain.
-        * **Spring Boot side:** Set `server.shutdown=graceful` and `spring.lifecycle.timeout-per-shutdown-phase=20s` — Spring waits for active requests to complete before closing the context and firing `@PreDestroy`.
-        * **Complete pattern:** K8s removes pod from endpoints → `preStop` sleep (5-10s) → `SIGTERM` → Spring graceful shutdown (20s) → `@PreDestroy` executes → process exits.
+                // ❌ private — proxy cannot override
+                @Transactional
+                private void processPrivate() { }
 
+                // ❌ self-invocation — 'this' bypasses proxy, @Transactional ignored
+                public void placeOrder() {
+                    this.processPayment();
+                }
+
+                @Transactional
+                public void processPayment() { }
+
+                // ❌ final — CGLIB cannot override final methods
+                @Transactional
+                public final void auditOrder() { }
+            }
+      ```
+    Fix for self-invocation:
+    ```java
+            // Inject self — goes through proxy
+            @Autowired private OrderService self;
+            self.processPayment();
+
+            // Or use AopContext (requires exposeProxy = true)
+            ((OrderService) AopContext.currentProxy()).processPayment();
+    ```
+  
+
+  * **Follow-up (Senior): You have a `@Scheduled` task that runs every minute and makes a DB call. In production under Kubernetes with 5 replicas, the task runs 5 times per minute — causing duplicate processing. How do you solve distributed scheduling in Spring Boot?**
+    * The root problem: Spring's `@Scheduled` is JVM-local — every instance runs independently with no coordination.
+    * **Solution 1 — ShedLock:** Annotate the method with `@SchedulerLock(name = "myTask", lockAtLeastFor = "50s", lockAtMostFor = "1m")`. ShedLock creates a lock record in a shared DB table (or Redis). Only the pod that acquires the lock executes; others skip.
+    ```java
+    @Scheduled(fixedRatwe = 60_000)
+    @SchedulerLock(name = "dailyReportTask", lockAtMostFor = "55s")
+    public void generateDailyReport() { ... }
+    ```
+    * **Solution 2 — Quartz Clustered Scheduler:** Replace `@Scheduled` with Quartz Jobs backed by a shared DB (JDBC JobStore). Quartz handles leader election natively. Heavier setup but feature-rich (job history, misfire handling, pausing jobs).
+    * **Solution 3 — Kubernetes CronJob:** Move the scheduled task to a separate K8s CronJob that spins up exactly one pod. No leader election needed — architectural separation instead.
+    * **Preferred for most teams:** ShedLock with Redis — minimal code change, no extra infrastructure, works with existing Spring `@Scheduled`.
+
+
+  * **Follow-up (Senior): A `@PreDestroy` method in your service is supposed to drain an in-flight queue before shutdown. In Kubernetes, it sometimes doesn't execute. Why, and how do you guarantee graceful shutdown?**
+    * Kubernetes sends `SIGTERM` to the container. The JVM receives it and begins shutdown — `@PreDestroy` hooks fire. **But** Kubernetes also stops sending traffic to the pod (removes from Service endpoints) ~2-3 seconds *after* `SIGTERM`, not before. So requests in-flight when `SIGTERM` arrives get `Connection Refused`.
+    * **Fix — `preStop` hook:** Configure a Kubernetes `lifecycle.preStop` sleep (e.g., `sleep 10`) — this delays `SIGTERM` by 10s after the pod is removed from the load balancer, allowing in-flight requests to drain.
+    * **Spring Boot side:** Set `server.shutdown=graceful` and `spring.lifecycle.timeout-per-shutdown-phase=20s` — Spring waits for active requests to complete before closing the context and firing `@PreDestroy`.
+    * **Complete pattern:** K8s removes pod from endpoints → `preStop` sleep (5-10s) → `SIGTERM` → Spring graceful shutdown (20s) → `@PreDestroy` executes → process exits.
+    ```yaml
+    SIGTERM received
+    ↓
+    Stop accepting NEW requests        ← close the front door
+    ↓
+    Wait for the 5 in-flight to finish ← let the current customers check out
+    ↓
+    All done → shut down cleanly
+    ```
 
 ---
 * [x] **Difference between @Autowired, @Inject, and @Resource**
@@ -751,47 +1388,47 @@ That’s all you need.
 | NEVER | **FAILS** ✗ | Runs without |
 | NESTED | Creates savepoint | **FAILS** ✗ |
 
-    * **Follow-up (Senior): `REQUIRES_NEW` suspends the current transaction and opens a new DB connection. What production problem does this cause with connection pools, and how do you tune around it?**
-        * `REQUIRES_NEW` holds **two connections simultaneously** per thread: the suspended one and the new one. If your pool size is 10 and 10 threads each hit a `REQUIRES_NEW` method, you need 20 connections — pool exhaustion → deadlock with all threads waiting for connections that are held by other waiting threads.
-        * **Rule:** Use `REQUIRES_NEW` sparingly. Monitor HikariCP's `hikaricp.connections.active` metric. Pool size must account for the max simultaneous connections per thread.
-        * **Better pattern for audit isolation:** Publish an event with `@TransactionalEventListener(AFTER_COMMIT)` instead — the audit write happens after the parent commits, in a fresh transaction, with no double-connection holding.
+* **Follow-up (Senior): `REQUIRES_NEW` suspends the current transaction and opens a new DB connection. What production problem does this cause with connection pools, and how do you tune around it?**
+    * `REQUIRES_NEW` holds **two connections simultaneously** per thread: the suspended one and the new one. If your pool size is 10 and 10 threads each hit a `REQUIRES_NEW` method, you need 20 connections — pool exhaustion → deadlock with all threads waiting for connections that are held by other waiting threads.
+    * **Rule:** Use `REQUIRES_NEW` sparingly. Monitor HikariCP's `hikaricp.connections.active` metric. Pool size must account for the max simultaneous connections per thread.
+    * **Better pattern for audit isolation:** Publish an event with `@TransactionalEventListener(AFTER_COMMIT)` instead — the audit write happens after the parent commits, in a fresh transaction, with no double-connection holding.
 
-    * **Follow-up (Senior): `@Transactional(readOnly = true)` — what does it actually do internally, and why should all read-only service methods use it?**
-        * Spring passes `readOnly = true` to the JDBC connection. Hibernate then: skips dirty checking (no snapshot comparison at flush time), disables first-level cache writes, and may route to a read replica if you have a routing `DataSource`.
-        * **Performance benefit at scale:** Skipping dirty checking alone saves significant CPU on large result sets. At Cisco's 500M+ document scale, this is meaningful.
-        * It also signals intent clearly in code — reviewers immediately know this method does not write.
+* **Follow-up (Senior): `@Transactional(readOnly = true)` — what does it actually do internally, and why should all read-only service methods use it?**
+    * Spring passes `readOnly = true` to the JDBC connection. Hibernate then: skips dirty checking (no snapshot comparison at flush time), disables first-level cache writes, and may route to a read replica if you have a routing `DataSource`.
+    * **Performance benefit at scale:** Skipping dirty checking alone saves significant CPU on large result sets. At Cisco's 500M+ document scale, this is meaningful.
+    * It also signals intent clearly in code — reviewers immediately know this method does not write.
 
-    * **Follow-up (Senior): `@Transactional` is not applied to your method even though it's annotated correctly. Walk through the 5 most common reasons this silently fails in production.**
-        1. **Self-invocation (same class):** Calling the `@Transactional` method from within the same bean bypasses the proxy. The annotation is ignored.
-        2. **`private` or `final` method:** Spring's CGLIB proxy cannot override `private`/`final` methods. Annotation silently ignored. Must be `public` and non-final.
-        3. **Exception type not rolling back:** By default, Spring only rolls back on unchecked exceptions (`RuntimeException`). A checked exception (e.g., `IOException`) commits the transaction unless you add `rollbackFor = Exception.class`.
-        4. **Wrong `@Transactional` import:** Using `javax.transaction.Transactional` instead of `org.springframework.transaction.annotation.Transactional` — behavior subtly differs, and `rollbackOn` semantics change.
-        5. **Bean not managed by Spring:** If the class is instantiated with `new` instead of injected, no proxy wraps it — `@Transactional` does nothing.
-        ```java
-        // ❌ Silent failure — checked exception, transaction commits
-        @Transactional
-        public void process() throws IOException { throw new IOException(); }
+* **Follow-up (Senior): `@Transactional` is not applied to your method even though it's annotated correctly. Walk through the 5 most common reasons this silently fails in production.**
+    1. **Self-invocation (same class):** Calling the `@Transactional` method from within the same bean bypasses the proxy. The annotation is ignored.
+    2. **`private` or `final` method:** Spring's CGLIB proxy cannot override `private`/`final` methods. Annotation silently ignored. Must be `public` and non-final.
+    3. **Exception type not rolling back:** By default, Spring only rolls back on unchecked exceptions (`RuntimeException`). A checked exception (e.g., `IOException`) commits the transaction unless you add `rollbackFor = Exception.class`.
+    4. **Wrong `@Transactional` import:** Using `javax.transaction.Transactional` instead of `org.springframework.transaction.annotation.Transactional` — behavior subtly differs, and `rollbackOn` semantics change.
+    5. **Bean not managed by Spring:** If the class is instantiated with `new` instead of injected, no proxy wraps it — `@Transactional` does nothing.
+    ```java
+    // ❌ Silent failure — checked exception, transaction commits
+    @Transactional
+    public void process() throws IOException { throw new IOException(); }
 
-        // ✅ Explicit rollback on all exceptions
-        @Transactional(rollbackFor = Exception.class)
-        public void process() throws IOException { throw new IOException(); }
-        ```
+    // ✅ Explicit rollback on all exceptions
+    @Transactional(rollbackFor = Exception.class)
+    public void process() throws IOException { throw new IOException(); }
+    ```
 
-    * **Follow-up (Senior): In a payment processing service, how do you implement an outbox pattern using Spring `@Transactional` to guarantee at-least-once delivery of domain events to Kafka — even if Kafka is temporarily down?**
-        * **The problem:** Writing to DB and publishing to Kafka in a single `@Transactional` block doesn't work — Kafka is not a transactional participant in the JDBC transaction. If Kafka publish fails after the DB commits, the event is lost.
-        * **Outbox pattern:**
-            1. In the same `@Transactional` DB write, also insert a row into an `outbox_events` table (`event_type`, `payload`, `created_at`, `processed = false`).
-            2. A separate `@Scheduled` poller (or Debezium CDC) reads unprocessed outbox rows, publishes to Kafka, then marks them `processed = true`.
-            3. If Kafka is down, events accumulate safely in the outbox table. When Kafka recovers, the poller drains the backlog.
-        ```java
-        @Transactional
-        public void processPayment(PaymentRequest req) {
-            paymentRepo.save(new Payment(req));
-            outboxRepo.save(new OutboxEvent("PAYMENT_PROCESSED", toJson(req)));
-            // Both writes in same ACID transaction — atomicity guaranteed
-        }
-        ```
-        * **Deduplication on consumer side:** Since it's at-least-once, use the event's `id` (idempotency key) in the Kafka consumer to skip already-processed events.
+* **Follow-up (Senior): In a payment processing service, how do you implement an outbox pattern using Spring `@Transactional` to guarantee at-least-once delivery of domain events to Kafka — even if Kafka is temporarily down?**
+    * **The problem:** Writing to DB and publishing to Kafka in a single `@Transactional` block doesn't work — Kafka is not a transactional participant in the JDBC transaction. If Kafka publish fails after the DB commits, the event is lost.
+    * **Outbox pattern:**
+        1. In the same `@Transactional` DB write, also insert a row into an `outbox_events` table (`event_type`, `payload`, `created_at`, `processed = false`).
+        2. A separate `@Scheduled` poller (or Debezium CDC) reads unprocessed outbox rows, publishes to Kafka, then marks them `processed = true`.
+        3. If Kafka is down, events accumulate safely in the outbox table. When Kafka recovers, the poller drains the backlog.
+    ```java
+    @Transactional
+    public void processPayment(PaymentRequest req) {
+        paymentRepo.save(new Payment(req));
+        outboxRepo.save(new OutboxEvent("PAYMENT_PROCESSED", toJson(req)));
+        // Both writes in same ACID transaction — atomicity guaranteed
+    }
+    ```
+    * **Deduplication on consumer side:** Since it's at-least-once, use the event's `id` (idempotency key) in the Kafka consumer to skip already-processed events.
 
 
 ---
@@ -862,17 +1499,17 @@ That’s all you need.
     * **HTTP Request**
         * SecurityFilterChain (15+ filters)
         * UsernamePasswordAuthenticationFilter : Intercepts login requests, extracts credentials
-            * ```
+          ```
               // Captures username/password from request
               UsernamePasswordAuthenticationToken token = new UsernamePasswordAuthenticationToken(username, password);
-              ```
+          ```
         * AuthenticationManager : Delegates authentication to providers
-            * ```
-              Authentication auth = authenticationManager.authenticate(token);
-              ```
+          ```
+          Authentication auth = authenticationManager.authenticate(token);
+          ```
 
         * AuthenticationProvider : Does actual authentication logic
-            * ```
+          ```
           @Override
           public Authentication authenticate(Authentication auth) {
           String username = auth.getName();
@@ -889,14 +1526,14 @@ That’s all you need.
           }
             ```
         * UserDetailsService : Loads user from database
-            * ```
+          ```
           @Override
           public UserDetails loadUserByUsername(String username) {
-          User user = userRepository.findByUsername(username);
-          return new org.springframework.security.core.userdetails.User(
-          user.getUsername(),
-          user.getPassword(),
-          user.getAuthorities());
+            User user = userRepository.findByUsername(username);
+            return new org.springframework.security.core.userdetails.User(
+            user.getUsername(),
+            user.getPassword(),
+            user.getAuthorities());
           }
            ```
         * Your Controller
@@ -1110,57 +1747,57 @@ That’s all you need.
         }
       }
   ```
-        * What happens internally (state-wise)
-            * CLOSED → calls flow normally
-            * Failures/timeouts increase → threshold crossed
-            * OPEN → calls blocked immediately, fallback executed
-            * After 5s → HALF-OPEN
-            * 2 test calls:
-                * success → CLOSED
-                * failure → OPEN
+  * What happens internally (state-wise)
+    * CLOSED → calls flow normally
+    * Failures/timeouts increase → threshold crossed
+    * OPEN → calls blocked immediately, fallback executed
+    * After 5s → HALF-OPEN
+    * 2 test calls:
+    * success → CLOSED
+    * failure → OPEN
+    * RateLimiter
+      * 5 calls/sec → request rejected immediately
+      * TimeLimiter
+      * Call >2s → timeout counted as failure
 
-        * RateLimiter
-            * 5 calls/sec → request rejected immediately
-        * TimeLimiter
-            * Call >2s → timeout counted as failure
 
-    * **Follow-up (Senior): The Circuit Breaker is OPEN and blocking calls. Your fallback returns a cached/default response. How do you distinguish between a "real" response and a fallback in the caller, and what metrics should alert your on-call engineer?**
-        * Add a response header or field in the response body to mark fallback responses (e.g., `X-Fallback: true`). Callers can decide to retry later or show a degraded UI.
-        * **Key Resilience4j metrics to export via Micrometer → Grafana:**
-            * `resilience4j.circuitbreaker.state` — alert when state becomes `OPEN`
-            * `resilience4j.circuitbreaker.failure.rate` — alert when failure rate trends above 40% (before threshold)
-            * `resilience4j.circuitbreaker.calls` tagged by `kind=failed` — sudden spike indicates downstream degradation
-            * `resilience4j.ratelimiter.available.permissions` — approaching 0 means rate limit is about to be hit
-        * **Production pattern:** Page on OPEN state; only notify (not page) on elevated failure rate. OPEN state means a user-facing degradation is active.
+* **Follow-up (Senior): The Circuit Breaker is OPEN and blocking calls. Your fallback returns a cached/default response. How do you distinguish between a "real" response and a fallback in the caller, and what metrics should alert your on-call engineer?**
+  * Add a response header or field in the response body to mark fallback responses (e.g., `X-Fallback: true`). Callers can decide to retry later or show a degraded UI.
+  * **Key Resilience4j metrics to export via Micrometer → Grafana:**
+  * `resilience4j.circuitbreaker.state` — alert when state becomes `OPEN`
+  * `resilience4j.circuitbreaker.failure.rate` — alert when failure rate trends above 40% (before threshold)
+  * `resilience4j.circuitbreaker.calls` tagged by `kind=failed` — sudden spike indicates downstream degradation
+  * `resilience4j.ratelimiter.available.permissions` — approaching 0 means rate limit is about to be hit
+  * **Production pattern:** Page on OPEN state; only notify (not page) on elevated failure rate. OPEN state means a user-facing degradation is active.
 
-    * **Follow-up (Senior): How do you test Circuit Breaker behaviour in a Spring Boot integration test without taking down a real downstream service?**
-        * Use **WireMock** to stub the downstream service and simulate fault scenarios (500s, timeouts, connection refused).
-        * Configure Resilience4j with a small `slidingWindowSize` (e.g., 3) and `minimumNumberOfCalls` (e.g., 2) for tests so the circuit opens quickly without needing hundreds of calls.
-        * Assert on the `CircuitBreaker.getState()` after triggering failures, and assert that the fallback method's return value is what the test receives.
-        ```java
-        @Test
-        void circuitShouldOpenAfterFailures() {
-            wireMock.stubFor(get("/payment").willReturn(serverError()));
+* **Follow-up (Senior): How do you test Circuit Breaker behaviour in a Spring Boot integration test without taking down a real downstream service?**
+    * Use **WireMock** to stub the downstream service and simulate fault scenarios (500s, timeouts, connection refused).
+    * Configure Resilience4j with a small `slidingWindowSize` (e.g., 3) and `minimumNumberOfCalls` (e.g., 2) for tests so the circuit opens quickly without needing hundreds of calls.
+    * Assert on the `CircuitBreaker.getState()` after triggering failures, and assert that the fallback method's return value is what the test receives.
+    ```java
+    @Test
+    void circuitShouldOpenAfterFailures() {
+        wireMock.stubFor(get("/payment").willReturn(serverError()));
             
-            IntStream.range(0, 5).forEach(i -> paymentService.pay());
+        IntStream.range(0, 5).forEach(i -> paymentService.pay());
             
-            assertThat(circuitBreaker.getState())
-                .isEqualTo(CircuitBreaker.State.OPEN);
-        }
-        ```
+        assertThat(circuitBreaker.getState())
+            .isEqualTo(CircuitBreaker.State.OPEN);
+    }
+    ```
 
-    * **Follow-up (Senior): In a microservice mesh with 8 downstream dependencies, each having its own circuit breaker, how do you prevent cascading failures where a slow dependency causes thread pool exhaustion in the calling service — even with circuit breakers open?**
-        * **The problem:** Even with a circuit breaker OPEN, if threads are blocked waiting for slow HTTP responses (before the breaker opens), those threads are consumed and unavailable for other calls. Thread pool exhaustion causes failures cascade to unrelated endpoints.
-        * **Solution — Bulkhead pattern:** Isolate each downstream client into a separate thread pool (or semaphore). A slow Payment service only exhausts the Payment thread pool, not the global Tomcat pool.
-        ```java
-        resilience4j:
-          bulkhead:
-            instances:
-              paymentService:
-                maxConcurrentCalls: 10      # max 10 simultaneous in-flight calls
-                maxWaitDuration: 50ms        # if all 10 busy, new callers wait 50ms then fail
-              inventoryService:
-                maxConcurrentCalls: 20
-        ```
-        * **Thread pool bulkhead vs semaphore:** Semaphore bulkhead limits concurrency but uses the calling thread (still vulnerable to thread blocking). Thread pool bulkhead uses a dedicated pool — calling thread returns immediately, downstream call runs in the pool thread. Prefer thread pool for truly non-blocking isolation.
-        * **Combined stack:** `@CircuitBreaker` + `@Bulkhead` + `@TimeLimiter` on every external call. This is the production-hardened Resilience4j stack used at companies like Razorpay for payment service isolation.
+* **Follow-up (Senior): In a microservice mesh with 8 downstream dependencies, each having its own circuit breaker, how do you prevent cascading failures where a slow dependency causes thread pool exhaustion in the calling service — even with circuit breakers open?**
+    * **The problem:** Even with a circuit breaker OPEN, if threads are blocked waiting for slow HTTP responses (before the breaker opens), those threads are consumed and unavailable for other calls. Thread pool exhaustion causes failures cascade to unrelated endpoints.
+    * **Solution — Bulkhead pattern:** Isolate each downstream client into a separate thread pool (or semaphore). A slow Payment service only exhausts the Payment thread pool, not the global Tomcat pool.
+    ```java
+    resilience4j:
+      bulkhead:
+        instances:
+          paymentService:
+            maxConcurrentCalls: 10      # max 10 simultaneous in-flight calls
+            maxWaitDuration: 50ms        # if all 10 busy, new callers wait 50ms then fail
+          inventoryService:
+            maxConcurrentCalls: 20
+    ```
+    * **Thread pool bulkhead vs semaphore:** Semaphore bulkhead limits concurrency but uses the calling thread (still vulnerable to thread blocking). Thread pool bulkhead uses a dedicated pool — calling thread returns immediately, downstream call runs in the pool thread. Prefer thread pool for truly non-blocking isolation.
+    * **Combined stack:** `@CircuitBreaker` + `@Bulkhead` + `@TimeLimiter` on every external call. This is the production-hardened Resilience4j stack used at companies like Razorpay for payment service isolation.

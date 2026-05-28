@@ -107,24 +107,72 @@ CLI = *command sender*, Daemon = *worker*, Engine = *overall system*.
 
 
 ---
+
 * [x] **Difference between CMD and ENTRYPOINT**
 
-    * **CMD** – Provides a **default command/arguments**; can be **easily overridden** at runtime.
-      *Example:* `CMD ["java","-jar","app.jar"]` → `docker run app bash` overrides it.
+    * **CMD** – Provides a **default command/arguments**; gets **completely replaced** if anything is passed at `docker run`.
 
-    * **ENTRYPOINT** – Defines the **main executable**; runtime arguments are **appended, not replaced**.
-      *Example:* `ENTRYPOINT ["java","-jar","app.jar"]` → `docker run app --debug` passes `--debug`.
-    * **Best practice:** Use **ENTRYPOINT** for the fixed executable and **CMD** for default arguments.
+      *Example:*
+      ```dockerfile
+      CMD ["java", "-jar", "app.jar"]
+      ```
+      ```bash
+      docker run myapp bash   # CMD is gone entirely, runs bash instead
+      ```
+
+    * **ENTRYPOINT** – Defines the **fixed executable**; anything passed at `docker run` is **appended as arguments**, not replaced.
+
+      *Example:*
+      ```dockerfile
+      ENTRYPOINT ["java", "-jar", "app.jar"]
+      ```
+      ```bash
+      docker run myapp --spring.profiles.active=prod
+      # Runs: java -jar app.jar --spring.profiles.active=prod
+      ```
+
+    * **Best practice:** Combine both — **ENTRYPOINT** for the fixed executable, **CMD** for swappable default arguments.
+
+      ```dockerfile
+      ENTRYPOINT ["java", "-jar", "app.jar"]
+      CMD ["--spring.profiles.active=dev"]
+      ```
+      ```bash
+      docker run myapp                                    # runs with dev profile
+      docker run myapp --spring.profiles.active=prod      # overrides to prod
+      ```
 
 ---
+
 * [x] **Difference between COPY and ADD**
-    * **COPY** – Copies files/directories **only from host to image**; simple and predictable.
-      *Example:* `COPY app.jar /app/`
 
-    * **ADD** – Does everything COPY does **plus** supports **URL download** and **auto-extracts tar files**.
-      *Example:* `ADD app.tar.gz /app/`
+    * **COPY** – Copies files/directories **only from host to image**; simple and predictable, does nothing extra.
 
-    * **Best practice:** Prefer **COPY**; use **ADD** only when you need tar extraction or URL fetch.
+      *Example:*
+      ```dockerfile
+      COPY app.jar /app/app.jar
+      ```
+      ```bash
+      # Straightforward — just puts app.jar into /app/ inside the image
+      ```
+
+    * **ADD** – Does everything COPY does, **plus** supports **URL downloading** and **auto-extracts tar archives**.
+
+      *Example:*
+      ```dockerfile
+      ADD app.tar.gz /app/        # auto-extracts contents into /app/
+      ADD https://example.com/app.jar /app/   # downloads directly into image
+      ```
+
+    * **Best practice:** Always prefer **COPY** for clarity and predictability; use **ADD** only when you specifically need **tar auto-extraction** or **URL fetching**.
+
+      ```dockerfile
+      # Preferred
+      COPY target/app.jar /app/app.jar
+
+      # Only when extraction is needed
+      ADD configs.tar.gz /app/config/
+      ```
 
 
 ---
@@ -310,24 +358,28 @@ Stops **and** removes in one command.
     * **container runtime:** (like Docker, containerd, or CRI-O) is the software responsible for actually running
       containers.
 
+
 * **How they work together:**
 
     1. **You submit a deployment** - You run something like `kubectl create deployment nginx --image=nginx`. This request goes to the **API Server**.
 
-    2. **API Server stores it** - The API Server validates your request and stores the desired state in **etcd**. At this point, nothing is running yet - it's just a specification saying "I want a pod with nginx."
+    2. **API Server authenticates & stores it** - The API Server validates (**AuthN/AuthZ + Admission Controllers**) your request and stores the desired state in **etcd**. At this point, nothing is running yet - it's just a specification saying "I want a pod with nginx."
 
-    3. **Controller Manager notices** - The **Deployment Controller** (part of the Controller Manager) is constantly
-       watching the API Server. It sees the new deployment and creates a **ReplicaSet**, which then creates the
-       **Pod specification** and sends it back to the API Server which stores it in etcd with status "Pending" and no
-       node assignment yet.
+    3. **Controller Manager notices** - The **Deployment Controller** (part of the Controller Manager) is constantly watching the API Server. It sees the new deployment and creates a **ReplicaSet**, which then creates the **Pod specification** and sends it back to the API Server which stores it in etcd with status `Pending` and no node assignment yet.
 
-    4. **Scheduler assigns it** - The **Scheduler** watches for pods that don't have a node assignment yet. It picks a suitable worker node based on resources and constraints, then updates the pod's specification in etcd to say "this pod should run on worker-node-2."
+    4. **Scheduler assigns it** - The **Scheduler** watches for pods that don't have a node assigned yet. It picks a suitable worker node based on **resources (CPU/memory), taints/tolerations, affinity rules, and constraints**, then updates the pod's specification in etcd to say "this pod should run on `worker-node-2`."
 
-    5. **Kubelet creates the pod** - The **kubelet** on worker-node-2 is constantly watching the API Server for pods assigned to it. When it sees this new pod assignment, it:
-        - Pulls the container image (nginx)
-        - Tells the container runtime (Docker/containerd) to create and start the containers
-        - Monitors the pod and reports status back to the API Server
+    5. **Kubelet creates the pod** - The **kubelet** on `worker-node-2` is constantly watching the API Server for pods assigned to its node. When it sees this new pod assignment, it:
+        - Runs **Init Containers** first (if defined) — e.g. wait for DB, pre-load config
+        - Pulls the container image (`nginx`) via the **Container Runtime (containerd/CRI-O)**
+        - Sets up **networking** via **CNI plugin** (assigns pod IP, sets up routing)
+        - Mounts **volumes** (ConfigMaps, Secrets, PVCs) into the container
+        - Starts the container and runs **startup/liveness/readiness probes**
+        - Reports pod status back to the API Server (`Running`)
 
+    6. **kube-proxy updates networking rules** - **kube-proxy** on each node watches for new pods and updates **iptables/IPVS rules** so the pod is reachable via its **Service ClusterIP** across the cluster.
+
+    7. **Pod is Ready** - Once the **readiness probe** passes, the pod is added to the **Service Endpoints** and starts receiving live traffic.
 ---
 
 * [x] **What are Pods, Nodes, and Clusters?**

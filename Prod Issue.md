@@ -42,46 +42,158 @@ Advertiser DSP ──► [Vert.x AdServer] ──► Redis (freq-cap / budget ch
 ```
 
 ---
+# Incident 1 — False Sharing: Why CPU Cache Made Our Counters Slow Each Other Down
 
-## Incident 1 — False Sharing: Why CPU Cache Made Our Counters Slow Each Other Down
+## System Architecture (Quick Reference)
 
-### What Was Happening
+```
+Advertiser DSP ──► [Vert.x AdServer] ──► Redis (freq-cap / budget check — fast path)
+                          │                      │ miss
+                          │               MySQL (campaign rules, budget caps)
+                          │
+                          ├──► Kafka: ad.impressions  (~5M events/min)
+                          ├──► Kafka: ad.clicks
+                          └──► Kafka: ad.conversions
+                                    │
+              ┌─────────────────────┴────────────────────────┐
+              │                                              │
+    [Analytics Ingestion]                        [Frequency Cap Updater]
+    Spring Boot → ScyllaDB                       Spring Boot → Redis + MySQL
+    (raw event writes)                           (counter sync)
+              │
+    [Reporting Service]
+    ScyllaDB reads + MySQL aggregations
+```
 
-During peak hours (09:00–11:00 AM), our AdServer bid response latency crept from **4ms up to 18ms** — more than 4× worse. But nothing external was broken. Redis was healthy. MySQL was healthy. Error rates were flat. The system was just... slower. CPU was running at 85% but we were only hitting 60% of expected throughput. The CPU was busy but not doing useful work.
+---
 
-### The Root Cause (Explained Simply)
+## What Was Happening
 
-To understand this, you first need to know one thing about how CPUs work: **a CPU never reads or writes a single variable directly from RAM.** It always pulls data in fixed-size chunks called **cache lines** — typically 64 bytes at a time. It loads that chunk into its own small, fast memory (L1/L2 cache) and works from there.
+During peak hours (08:00–11:00 PM), our AdServer bid response latency crept from **4ms up to 18ms** — more than 4× 
+worse. But nothing external was broken. Redis was healthy. MySQL was healthy. Error rates were flat. The system was just... slower. CPU was running at 85% but we were only hitting 60% of expected throughput. The CPU was busy but not doing useful work.
 
-Now here's where the problem starts. A `long` in Java is 8 bytes. So one 64-byte cache line can hold **8 `long` fields** sitting next to each other in memory. That's exactly what our `BudgetRegistry` looked like — 5 counter fields, all declared one after the other, all packed into the same cache line.
+---
 
-Now imagine Thread 1 (running on Core 1) updates `totalImpressions`, and Thread 2 (running on Core 2) simultaneously updates `totalClicks`. These are logically independent. Thread 1 doesn't care about clicks. Thread 2 doesn't care about impressions. But the CPU has no idea — it only sees one cache line. The moment Thread 1 modifies its field, the CPU marks **the entire 64-byte block** as "modified on Core 1". Core 2 now sees its copy of that same cache line as stale. It has to throw it away and re-fetch from memory — even though `totalClicks` didn't change at all.
+## Background — How CPU Caches Work
 
-**This is false sharing.** Two threads appear to share data (they share a cache line) even though they logically share nothing. Every write by one thread forces every other thread to do a cache reload. At 83K req/sec with multiple event-loop threads all writing to this singleton, the cores were spending more time invalidating and reloading cache than doing actual work. And this was completely invisible locally — on a laptop with one CPU core running tests, there's no cross-core contention. It only showed up under production load on a real multi-core machine.
+To understand this incident, you need to know one thing about how CPUs work: **a CPU never reads or writes a single variable directly from RAM.** It always pulls data in fixed-size chunks called **cache lines** — typically 64 bytes at a time. It loads that chunk into its own small, fast memory (L1/L2/L3 cache) and works from there.
+
+There are three levels of CPU cache, each progressively larger but slower:
+
+- **L1 Cache** — Fastest, closest to the CPU core. Extremely small (16KB–128KB per core). Stores the most immediate data the CPU is currently executing on.
+- **L2 Cache** — Larger but slightly slower than L1. Typically 256KB to a few MB per core. Stores data the CPU is likely to need next.
+- **L3 Cache** — Largest and slowest cache level, but still much faster than RAM. Shared across all CPU cores (a few MB to 100+ MB). Holds data being passed between different cores.
+
+A `long` in Java is 8 bytes. So one 64-byte cache line can hold **8 `long` fields** sitting next to each other in memory.
+
+---
+
+## Root Cause — False Sharing
+
+### What is False Sharing?
+
+When two threads on different CPU cores update **logically independent fields** that happen to live on the **same 64-byte cache line**, every write by one thread forces every other core to invalidate and re-fetch that entire cache line — even though the other thread's field didn't change at all.
+
+**Two threads appear to share data (they share a cache line) even though they logically share nothing.**
+
+### Why We Had This Problem — The BudgetRegistry
+
+**`campaignId` is our Kafka partition key.** This means one pod owns all events for a given campaign completely:
+
+```
+Campaign X → always Partition 3 → always Pod 2
+Campaign Y → always Partition 7 → always Pod 5
+```
+
+Each campaign on each pod has its own `BudgetRegistry` instance — a pod-local, per-campaign write buffer. Instead of calling Redis on every single Kafka event at 20,000 events/sec per campaign, the registry accumulates counts locally and flushes aggregated values to Redis every 5 seconds in a single batch write:
+
+```
+Without registry:  20,000 Kafka events/sec → 20,000 Redis calls/sec  ✗
+With registry:     20,000 Kafka events/sec → 1 Redis call per 5 sec  ✓
+```
+
+This is a standard **write-buffering pattern** — accumulate locally, sync periodically.
 
 ### The Problematic Code
 
 ```java
-// These 5 fields are declared together → JVM packs them adjacently in memory
-// All 5 fit inside one 64-byte CPU cache line
+// BudgetRegistry — pod-local, per-campaign write buffer
+// Accumulates counts locally across multiple Kafka consumer threads
+// Flushes aggregated values to Redis every 5 seconds
+//
+// These 4 fields are declared together → JVM packs them adjacently in memory
+// All 4 fit inside one 64-byte CPU cache line
 public class BudgetRegistry {
-  private volatile long totalBidRequests;     // 8 bytes
-  private volatile long totalImpressions;     // 8 bytes  ← same cache line
-  private volatile long totalClicks;          // 8 bytes  ← same cache line
-  private volatile long budgetConsumedMicros; // 8 bytes  ← same cache line
-  private volatile long frequencyCapHits;     // 8 bytes  ← same cache line
+    private volatile long totalBidRequests;     // 8 bytes ─┐
+    private volatile long totalImpressions;     // 8 bytes  │ all packed into
+    private volatile long totalClicks;          // 8 bytes  │ same 64-byte cache line
+    private volatile long budgetConsumedMicros; // 8 bytes ─┘
 }
-
-// What happens at runtime:
-// Thread 1 writes totalImpressions → CPU invalidates this entire 64-byte line on all other cores
-// Thread 2 (was working on totalClicks) now has a stale cache line → must re-fetch from RAM
-// Thread 2 writes totalClicks → CPU invalidates the line again → Thread 1 must re-fetch
-// This ping-pong happens millions of times per second. All threads slow each other down.
 ```
 
-Similarly, the Analytics Ingestion Service had a `AtomicLong[]` counter array shared across Kafka consumer threads — and array elements at neighbouring indices were also falling into the same cache lines.
+### Why Multiple Threads Hit the Same Registry
 
-### How We Found It
+Each campaign's pod runs **multiple concurrent Kafka consumer threads** across separate topics — all updating the same `BudgetRegistry` instance simultaneously:
+
+```
+ad.impressions consumer thread  → updates totalImpressions + budgetConsumedMicros
+ad.clicks consumer thread       → updates totalClicks
+ad.bids consumer thread         → updates totalBidRequests
+
+All three threads → same BudgetRegistry instance → same 64-byte cache line
+```
+
+Spring Kafka's `concurrency` setting makes this worse — multiple threads can consume the same partition simultaneously for higher throughput:
+
+```java
+@KafkaListener(
+    topics = "ad.impressions",
+    concurrency = "4"  // 4 threads, all updating same BudgetRegistry
+)
+public void handleImpression(ImpressionEvent event) {
+    budgetRegistry.addBudgetConsumed(event.getBidPriceMicros());
+    budgetRegistry.incrementImpressions();
+}
+```
+
+### What Happens at Runtime
+
+```
+Thread 1 writes totalImpressions
+  → CPU marks entire 64-byte cache line as "modified on Core 1"
+  → Cores 2, 3, 4 see their copy as stale → must re-fetch from RAM
+
+Thread 2 (was working on totalClicks on Core 2)
+  → cache line invalidated → re-fetches from RAM
+  → writes totalClicks → now Core 1, 3, 4 must re-fetch
+
+Thread 3 (was working on budgetConsumedMicros on Core 3)
+  → cache line invalidated again → re-fetches from RAM
+  → writes budgetConsumedMicros → all other cores must re-fetch
+
+This ping-pong happens millions of times per second.
+Cores spend more time on cache coherence than actual work.
+```
+
+### Important — Why `volatile` Does NOT Fix This
+
+A common misconception is that `volatile` prevents false sharing. It does not:
+
+```
+volatile guarantees:
+  → visibility  (other threads see latest value)     ✓
+  → ordering    (no instruction reordering)          ✓
+
+volatile does NOT control:
+  → which cache line a field lives on                ✗
+  → whether fields are packed adjacently in memory   ✗
+```
+
+False sharing is a **CPU-level problem** about cache line placement. `volatile`, `AtomicLong`, and `synchronized` are all Java-level concepts — they have no control over which cache line a field occupies. Only `@Contended` fixes it.
+
+---
+
+## How We Found It
 
 The first hint came from Grafana — latency spiking, but no external dependency degraded. That asymmetry pointed inward: the slowdown was happening inside the JVM, not in Redis or MySQL. We then profiled directly on the GKE node:
 
@@ -92,36 +204,57 @@ perf stat -e cache-misses,L1-dcache-load-misses,LLC-load-misses \
 
 **L1 cache miss rate: 38%.** For a workload operating mostly on in-memory counters, normal is under 5%. That number told us immediately — cores were constantly invalidating each other's cache. Async Profiler confirmed the hot frames were inside `BudgetRegistry` field writes with abnormally high cycles per operation.
 
-### The Fix
+---
 
-There are only two things that matter here: fix the shared singleton fields, and fix the array counters. Everything else is noise.
+## The Fix
 
-**Fix 1 — Pad each field onto its own cache line using `@Contended`:**
+Two changes. Nothing else.
+
+### Fix 1 — Pad Each Field onto Its Own Cache Line Using `@Contended`
 
 ```java
 import jdk.internal.vm.annotation.Contended;
 
-// @Contended tells the JVM: add padding around this field
-// so it occupies its own 64-byte cache line, isolated from its neighbours.
-// Thread 1 writing totalImpressions no longer affects Thread 2's cache for totalClicks.
+// @Contended tells the JVM: add 56 bytes of padding around this field
+// so it occupies its own isolated 64-byte cache line.
+//
+// Thread 1 writing totalImpressions no longer invalidates
+// Thread 2's cache line for totalClicks — they are on separate cache lines.
 public class BudgetRegistry {
-  @Contended
-  private volatile long totalBidRequests;
+    @Contended
+    private volatile long totalBidRequests;
 
-  @Contended
-  private volatile long totalImpressions;
+    @Contended
+    private volatile long totalImpressions;
 
-  @Contended
-  private volatile long totalClicks;
+    @Contended
+    private volatile long totalClicks;
 
-  @Contended
-  private volatile long budgetConsumedMicros;
+    @Contended
+    private volatile long budgetConsumedMicros;
 }
+
 // JVM startup flag required to allow this in production:
 // -XX:-RestrictContended
 ```
 
-**Fix 2 — Replace `AtomicLong[]` with `LongAdder[]` for Kafka consumer counters:**
+**What `@Contended` does physically:**
+
+```
+Before @Contended — all fields on same cache line:
+[totalBidRequests][totalImpressions][totalClicks][budgetConsumedMicros] ← 64 bytes, one cache line
+
+After @Contended — each field on its own cache line:
+[totalBidRequests    + 56 bytes padding] ← own cache line
+[totalImpressions   + 56 bytes padding] ← own cache line
+[totalClicks        + 56 bytes padding] ← own cache line
+[budgetConsumedMicros + 56 bytes padding] ← own cache line
+
+Thread 1 writes totalImpressions → only that cache line invalidated
+Thread 2's cache line for totalClicks → untouched, no re-fetch needed
+```
+
+### Fix 2 — Replace `AtomicLong[]` with `LongAdder[]` for Kafka Consumer Counters
 
 ```java
 // WRONG — array[i] and array[i+1] share a 64-byte cache line
@@ -135,11 +268,94 @@ private final LongAdder[] segmentCounters = new LongAdder[SEGMENT_COUNT];
 // .increment() for writes, .sum() for reads — that's it
 ```
 
-That's the entire fix. Two changes, surgically applied to the two places where false sharing was happening.
+---
 
-### How to Explain This in an Interview
+## Safe Flush to Redis — Atomic Reset Pattern
 
-> *"We had bid latency climbing from 4ms to 18ms under peak load with no external cause — Redis and MySQL were both healthy. CPU was pegged at 85% but throughput was only at 60% of what we'd expect. We profiled the GKE node and saw L1 cache miss rate at 38%, which for an in-memory counter workload is way off. The problem was false sharing. We had a shared singleton `BudgetRegistry` with multiple `volatile long` fields declared adjacently. The JVM packs those fields next to each other in memory, so they all end up in the same 64-byte CPU cache line. When one event-loop thread wrote to `totalImpressions`, it forced every other core to invalidate its copy of that entire cache line — including `totalClicks`, which they hadn't touched. This ping-pong between cores was happening millions of times per second, killing throughput. We fixed it with `@Contended` on each field — this tells the JVM to add padding so each field lives on its own isolated cache line. We also replaced `AtomicLong[]` with `LongAdder[]` for the Kafka consumer segment counters, since LongAdder uses internally padded per-thread cells by design."*
+When the scheduler flushes local counts to Redis every 5 seconds, a naive read-then-reset creates a race condition:
+
+```
+// WRONG — race condition
+long impressions = totalImpressions; // Thread 2 adds 50 more here
+totalImpressions = 0;                // those 50 events are lost forever
+```
+
+The fix is `getAndSet(0)` — atomically swaps the current value with 0, so no events are lost between read and reset:
+
+```java
+// Scheduler runs every 5 seconds
+public void flushToRedis(RedisClient redis) {
+        long impressions = totalImpressions.getAndSet(0);
+        long clicks = totalClicks.getAndSet(0);
+        long budget = budgetConsumedMicros.getAndSet(0);
+        long bids = totalBidRequests.getAndSet(0);
+
+        try {
+            redis.incrBy("campaign:X:impressions", impressions);
+            redis.incrBy("campaign:X:clicks", clicks);
+            redis.incrBy("campaign:X:budget", budget);
+            redis.incrBy("campaign:X:bids", bids);
+        } catch (Exception e) {
+            // Redis write failed - restore counters
+            totalImpressions.addAndGet(impressions);
+            totalClicks.addAndGet(clicks);
+            budgetConsumedMicros.addAndGet(budget);
+            totalBidRequests.addAndGet(bids);
+            throw e;
+           }
+        }
+```
+
+---
+
+## Three-Layer Architecture — Each Layer Has a Different Job
+
+```
+BudgetRegistry (pod-local, per-campaign)
+  → write buffer, nanosecond speed
+  → accumulates counts across Kafka consumer threads
+  → flushes to Redis every 5 seconds
+  → purpose: avoid 20,000 Redis calls/sec per campaign
+
+Redis (global, approximate)
+  → near-realtime aggregated counts across all pods
+  → used for frequency cap and budget enforcement decisions
+  → updated by periodic registry flushes
+
+Flink / Analytics Pipeline
+  → exact, billing-accurate counts
+  → used for dashboards, invoicing, campaign reporting
+  → purpose: authoritative historical record
+```
+
+Flink and Redis are not replacements for the registry — they operate at completely different time granularities and serve different consumers.
+
+---
+
+## Pod Restart — Rehydration
+
+Since `campaignId` is the partition key, a pod restart means the registry loses its local state. On startup, the pod rehydrates from Redis — getting last known counts — and resumes. Worst case: 5 seconds of local state lost between the last flush and the restart. Acceptable for our SLA.
+
+---
+
+## Results
+
+| Metric | Before Fix | After Fix |
+|---|---|---|
+| Bid response latency (peak) | 18ms | 4ms |
+| L1 cache miss rate | 38% | <5% |
+| CPU throughput | 60% of expected | 100% of expected |
+| Redis calls per campaign/sec | N/A (direct) | ~0.2 (one per 5s) |
+
+---
+
+## Interview Answer
+
+> During peak viewing hours — 8-11 PM when users are actively streaming — our AdServer bid response latency climbed from 4ms to 18ms with no external cause. Redis and MySQL were both healthy. CPU was at 85% but throughput was only 60% of expected.
+We profiled the GKE node and saw L1 cache miss rate at 38%, way off from the normal under 5% for an in-memory counter workload. That immediately told us cores were constantly invalidating each other's caches.
+The problem was false sharing in our BudgetRegistry — a pod-local, per-campaign write buffer that accumulates impression/click counts locally across multiple Kafka consumer threads, then flushes to Redis every 5 seconds. This avoids hammering Redis with 20,000 individual calls per campaign per second.
+The issue was that all four counter fields — totalImpressions, totalClicks, totalBudgetConsumed, totalBidRequests — were packed into the same 64-byte CPU cache line. When the impressions consumer thread wrote to one field, it invalidated that entire cache line on every other core, forcing them to re-fetch from RAM even though their own fields hadn't changed. At peak traffic (8-11 PM), this ping-pong was happening millions of times per second.
+The fix was @Contended on each field — it tells the JVM to add 56 bytes of padding so each field gets its own isolated cache line. We also replaced AtomicLong[] with LongAdder[] for the Kafka consumer counters since LongAdder internally pads its cells. L1 miss rate dropped back below 5%, latency back to 4ms, and we hit 100% of expected throughput.
 
 ---
 
@@ -349,156 +565,459 @@ LoadingCache<String, TargetingRule> ruleCache = Caffeine.newBuilder()
         .build(campaignId -> targetingServiceClient.getRule(campaignId));
 ```
 
-**Fix 4 — Fail fast on HikariCP instead of queuing for 30 seconds:**
 
-```yaml
-spring:
-  datasource:
-    hikari:
-      maximum-pool-size: 20
-      connection-timeout: 3000   # 3 seconds, not 30 — fail fast
-      leak-detection-threshold: 5000
-```
 
 If we fail fast, threads get an error quickly, back off, and the stampede self-heals in seconds instead of 30-second waves of thread accumulation.
 
 ### How to Explain This in an Interview
 
-> *"At 9 AM one day, targeting service latency went from 8ms to over 4 seconds. MySQL connection pool was immediately at max. The cause was a cache stampede — all 200 campaign targeting rules had been loaded into Redis at startup with a fixed 5-minute TTL. They all expired at exactly the same time, and at 83K req/sec, hundreds of threads simultaneously missed the cache and raced to MySQL. Twenty connections, thousands of requests. We fixed it in three ways: request coalescing with a `ConcurrentHashMap<String, CompletableFuture>` so only one MySQL query fires per cache key regardless of how many threads miss; mandatory TTL jitter so keys can never all expire together; and `refreshAfterWrite` in Caffeine so the hot path proactively refreshes before expiry and no thread ever sees a miss on a warm key. We also tightened HikariCP connection timeout from 30 seconds to 3 so the blast radius self-heals fast."*
+> *"At 9 AM, targeting service latency spiked from 8ms to over 4 seconds. MySQL connection pool maxed out instantly. The cause was a cache stampede — all 200 campaign targeting rules had been loaded at startup with a fixed 5-minute TTL, so they all expired simultaneously. At 83K req/sec across 5 pods, hundreds of threads in each pod simultaneously missed the cache and raced to MySQL.
+We fixed it in three complementary ways:
+First, request coalescing — using a ConcurrentHashMap<String, CompletableFuture> within each pod, so when 500 threads all miss for the same campaign, only 1 MySQL query fires and the other 499 wait on that future. This helps within a single pod.
+Second, TTL jitter — instead of all keys expiring at exactly T=5:00, we add random jitter (±30 seconds) at write time. So 200 campaigns expire at staggered times across all pods, preventing synchronized expiry. This is now mandatory for any TTL under 15 minutes.
+Third and most importantly, Caffeine refreshAfterWrite — the hot path uses a local Caffeine cache with refreshAfterWrite(4 minutes) and expireAfterWrite(6 minutes). At 4 minutes, Caffeine triggers an async background refresh from the targeting service, so the value is fresh before the hard expiry at 6 minutes. No thread ever blocks on a cache miss for a warm key.
+The combination prevents both within-pod stampedes and cross-pod synchronized expiry. We also tightened HikariCP timeout from 30 seconds to 3 seconds so any stampede that does happen self-heals fast."*
 
 ---
 
-## Incident 4 — GC Pressure: Kafka Consumer Allocating Its Way Into an OOMKill
+# Incident 4 — GC Pressure: Kafka Consumer Allocating Its Way Into an OOMKill
 
-### What Was Happening
+## What Was Happening
 
-The Analytics Ingestion Service (Spring Boot + Kafka consumer → ScyllaDB) was running fine for hours, then gradually getting slower, then occasionally getting **OOMKilled by Kubernetes**. GC pauses were growing over time — 800ms, then 1.1 seconds, then 1.4 seconds, then a 1.8-second full stop-the-world pause. Each pod restart fixed it for a few hours, then it happened again. The Grafana heap chart looked like a sawtooth where each tooth was getting taller — a classic sign that something was leaking into Old Gen.
+The **Analytics Ingestion Service** (Spring Boot + Kafka consumer → ScyllaDB) was running fine for hours, then gradually getting slower, eventually getting **OOMKilled by Kubernetes**.
 
-### The Root Cause (Explained Simply)
+### Symptoms Observed
 
-Three independent problems, all pushing the same direction:
+- GC pauses growing over time: **800ms → 1.1s → 1.4s → 1.8s** (full stop-the-world)
+- Heap chart in Grafana showed **sawtooth pattern with increasing amplitude** — classic Old Gen leak
+- Pod restart fixed it temporarily (a few hours), then it happened again
+- At peak: **83K events/sec** across 4 concurrent Kafka consumer threads
 
-**Problem 1 — Massive object allocation per Kafka message.** At 83K events/sec across 4 consumer threads, every message created: a new `ImpressionEvent` object (Jackson deserialization), multiple `String` objects, a boxed `Long` from `HashMap.compute()`. Eden space filled in ~80ms. During Kafka burst (catching up on a backlog), it filled in under 20ms. Objects promoted to Old Gen faster than GC could collect them.
+---
 
-**Problem 2 — Unbounded ScyllaDB async queue.** We were calling `executeAsync()` on ScyllaDB with no backpressure. If ScyllaDB was briefly throttled (compaction, node coordination), pending futures accumulated in heap — each holding a full event payload. Thousands of futures × full event objects = Old Gen bloat.
+## Root Cause Analysis
 
-**Problem 3 — Prometheus label cardinality explosion.** We were registering a Prometheus counter with `campaign_id` as a label. We had 50,000+ unique campaign IDs. That created 50,000+ Prometheus time series in memory, growing the Micrometer registry by ~1.8GB of heap — directly competing with the application.
+**Three independent problems, all pushing the same direction:**
 
-### How We Found It
-
-Grafana was the primary surface. The heap sawtooth with increasing amplitude was visible for hours before the OOMKill. After the kill, Kubernetes events showed `OOMKilling`. We ran:
-
-```bash
-# Async Profiler allocation flamegraph:
-java -jar async-profiler.jar -e alloc -d 30 -f alloc.html <pid>
-# Top allocators: ImpressionEvent 34%, byte[] Jackson deserialization 28%,
-#                 Long autoboxing in HashMap.compute() 18%
-
-# Prometheus cardinality check:
-curl http://localhost:8080/actuator/prometheus | grep "ad_impressions_processed" | wc -l
-# Output: 51,847 lines — one metric line per campaign ID
-```
-
-GC logs (pre-configured in the JVM) showed Full GC duration increasing each cycle — confirming Old Gen was never fully cleaning.
-
-### The Fix
-
-**Fix 1 — Eliminate autoboxing with a primitive map:**
+### Problem 1: Massive Object Allocation Per Kafka Message
 
 ```java
-// BEFORE: HashMap<String, Long> — allocates a Long object wrapper per update
-counters.compute(event.getCampaignId(), (k, v) -> v == null ? 1L : v + 1);
-//                                                 ^^^^ boxes long → Long every time
-
-// AFTER: Eclipse Collections primitive map — stores raw long, no boxing
-import org.eclipse.collections.impl.map.mutable.primitive.ObjectLongHashMap;
-
-private final ObjectLongHashMap<String> campaignCounters = new ObjectLongHashMap<>();
-        campaignCounters.addToValue(event.getCampaignId(), 1L); // zero object allocation
-```
-
-**Fix 2 — Reuse the deserialization object instead of allocating a new one per message:**
-
-```java
-// One ImpressionEvent object per consumer thread, reused for every message
-private static final ThreadLocal<ImpressionEvent> REUSABLE_EVENT =
-        ThreadLocal.withInitial(ImpressionEvent::new);
-
-private static final ObjectReader EVENT_READER = MAPPER.readerForUpdating(null);
-
+// KAFKA CONSUMER — Spring Boot
 @KafkaListener(topics = "ad.impressions", concurrency = "4")
 public void consume(ConsumerRecord<String, byte[]> record) {
-        ImpressionEvent event = REUSABLE_EVENT.get();
-        EVENT_READER.withValueToUpdate(event).readValue(record.value());
-        // Fields are overwritten in place — no new object allocated
-        processEvent(event);
-        }
+    // ISSUE: Every message triggers deserialization
+    // At 83K events/sec, this creates massive Eden pressure
+    ImpressionEvent event = MAPPER.readValue(record.value(), ImpressionEvent.class);
+    //                       ^^^^^^
+    //                       New object allocated here
+    //                       + new String objects from Jackson parsing
+    //                       + temporary byte[] arrays
+    
+    processEvent(event);
+}
 ```
 
-**Fix 3 — Add a semaphore to limit in-flight ScyllaDB writes:**
+**The Numbers:**
+- 83,000 events/sec = 83K objects per second
+- Each `ImpressionEvent` object: ~200 bytes
+- Jackson temporary allocations: +100-150 bytes per message
+- **Eden space filled in ~80ms** during normal load
+- **Eden space filled in ~20ms** during Kafka backlog catch-up
+
+Objects promoted to Old Gen faster than GC could collect them.
+
+---
+
+### Problem 2: Unbounded ScyllaDB Async Queue (Backpressure Missing)
 
 ```java
-// Max 500 async writes in flight at a time
-// If ScyllaDB throttles, this blocks the consumer thread instead of accumulating futures
-private final Semaphore scyllaPermits = new Semaphore(500);
+// SCYLLADB WRITER — No backpressure
+private final CqlSession scyllaSession;
 
 public void writeToScylla(ImpressionEvent event) {
-        scyllaPermits.acquire(); // slows the consumer down — deliberate backpressure
-        scyllaSession.executeAsync(buildStatement(event))
-        .whenComplete((rs, ex) -> scyllaPermits.release());
-        }
+    // ISSUE: executeAsync with no limit
+    // If ScyllaDB throttles (compaction, node coordination),
+    // futures accumulate in heap with full event payloads
+    scyllaSession.executeAsync(buildStatement(event))
+            .whenComplete((rs, ex) -> {
+                // callback here
+            });
+    // Returns immediately — doesn't wait for write to complete
+    // Thousands of pending futures = Old Gen bloat
+}
 ```
 
-**Fix 4 — Fix Prometheus label cardinality:**
+**What Happens During ScyllaDB Compaction:**
+
+```
+T=0s    ScyllaDB doing compaction (paused writes)
+T=0s    Consumer keeps calling executeAsync()
+        ├─ Future 1 created (event payload in memory)
+        ├─ Future 2 created (event payload in memory)
+        ├─ Future 3 created (event payload in memory)
+        ├─ ...
+        └─ Future 5000 created in 1 second
+
+T=1s    ScyllaDB resumes
+        Futures finally complete, but 5000 × full event objects 
+        were held in Old Gen for that 1 second
+        
+GC tries to clean, but new events keep arriving faster
+→ Old Gen never gets fully cleaned
+→ Full GC pauses get longer each cycle
+```
+
+---
+
+### Problem 3: Prometheus Label Cardinality Explosion
 
 ```java
-// BEFORE: 50,000 unique values for campaign_id = 50,000 time series in memory
-Counter.builder("ad.impressions.processed")
-        .tag("campaign_id", event.getCampaignId()) // NEVER DO THIS
+// PROMETHEUS METRICS — High cardinality tag
+// ISSUE: campaign_id has 50,000+ unique values
 
-// AFTER: only categorical labels with bounded cardinality
-        Counter.builder("ad.impressions.processed")
-        .tag("advertiser_tier", event.getAdvertiserTier()) // "premium", "standard", "house"
-        .tag("ad_format", event.getAdFormat())             // "display", "video", "native"
+Counter.builder("ad.impressions.processed")
+        .tag("campaign_id", event.getCampaignId())  // ✗ NEVER DO THIS
         .register(registry)
         .increment();
 
-// Per-campaign counts go to ScyllaDB for reporting — not Prometheus
+// Result:
+// - 50,000+ unique campaign IDs
+// - = 50,000+ separate Prometheus time series
+// - = 50,000+ entries in Micrometer registry (IN MEMORY)
+// - = ~1.8 GB of heap just for metrics metadata
 ```
 
-**Fix 5 — Right GC algorithm for each service type:**
+**Checking Cardinality:**
 
 ```bash
-# Vert.x AdServer — sub-millisecond pauses are critical. Use ZGC.
--XX:+UseZGC -Xms4g -Xmx4g -XX:SoftMaxHeapSize=3500m
+curl http://localhost:8080/actuator/prometheus | grep "ad_impressions_processed" | wc -l
 
-# Spring Boot Analytics — throughput matters more than pause time. G1GC.
--XX:+UseG1GC -XX:MaxGCPauseMillis=100 -XX:G1HeapRegionSize=16m
--XX:InitiatingHeapOccupancyPercent=40
--Xlog:gc*:file=/var/log/gc.log:time,uptime,level,tags:filecount=5,filesize=20m
+# Output: 51,847 lines
+# Each line = one metric in memory
+# Result: 1.8GB of heap used by Prometheus metadata
 ```
 
-**On Kubernetes memory limits — the thing most people get wrong:**
+This heap was **directly competing with the application** for GC pressure.
 
-A common mistake: setting `limits.memory` equal to `-Xmx`. But the JVM uses memory outside the heap too:
+---
+
+## How We Found It
+
+### Signal 1: Grafana Heap Sawtooth
+```
+Heap usage over 4 hours:
+3.5GB ╱╲    ╱╲    ╱╲    ╱╲     ← Getting taller each time
+3.2GB ╱  ╲╱  ╲╱  ╲╱  ╲╱
+3.0GB
+2.8GB
+```
+
+The amplitude increases = Full GC not cleaning enough = Old Gen leak.
+
+### Signal 2: Async Profiler Allocation Flamegraph
+
+```bash
+java -jar async-profiler.jar -e alloc -d 30 -f alloc.html <pid>
+```
+
+**Top Allocators:**
+- ImpressionEvent: **34%** (deserialization)
+- byte[] (Jackson): **28%** (temporary buffers)
+- Long autoboxing: **18%** (HashMap.compute())
+- Other: 20%
+
+### Signal 3: GC Logs
 
 ```
-Pod Memory Limit = Xmx (heap)
-                 + Metaspace         (~256–512 MB)
-                 + Direct/Off-heap   (Netty/Vert.x: ~512 MB; Kafka client: ~200 MB)
-                 + Thread stacks     (thread count × 512 KB)
-                 + JIT code cache    (~256 MB)
-                 + Safety margin     (10%)
-
-# For Xmx=4g: 4096 + 512 + 200 + ~2 + 256 + ~520 = ~5,800 MB → set limit to 6Gi
+[0.500s][info][gc,heap] GC(1): Full GC pause: 800ms, Reclaimable: 85%
+[1.200s][info][gc,heap] GC(2): Full GC pause: 1100ms, Reclaimable: 70%
+[1.950s][info][gc,heap] GC(3): Full GC pause: 1400ms, Reclaimable: 55%
+[2.800s][info][gc,heap] GC(4): Full GC pause: 1800ms, Reclaimable: 30%
 ```
 
-If `limits.memory = Xmx`, Kubernetes will OOMKill the pod for off-heap usage even when the GC log shows heap is fine.
+Pause time increasing + reclaimable memory decreasing = Old Gen fragmentation.
 
-### How to Explain This in an Interview
+---
 
-> *"Our Analytics Ingestion Service was getting OOMKilled every few hours. Heap sawtooth in Grafana was the first signal — each GC cycle cleaning less and less, Full GC pauses growing from 800ms to 1.8 seconds. We found three root causes with Async Profiler and Prometheus cardinality checks. First, we were allocating a new `ImpressionEvent` object per Kafka message at 83K/sec — Eden space filling every 80ms. We fixed that with `ThreadLocal` object reuse and Jackson's `readerForUpdating`. Second, we had unbounded ScyllaDB `executeAsync` calls — during compaction, futures accumulated in heap holding full event payloads. We added a semaphore for deliberate backpressure. Third, we had 50,000+ Prometheus time series from tagging by campaign ID — 1.8GB of Micrometer registry in heap competing with the application. We replaced high-cardinality labels with categorical ones. Also, we were setting Kubernetes memory limits equal to Xmx and getting OOMKilled by off-heap growth — fixed by adding 2.5G headroom above Xmx for Metaspace, Netty buffers, and thread stacks."*
+## The Fix
 
+### Fix 1: Eliminate Autoboxing with Primitive Maps
+
+**Before:**
+```java
+// HashMap<String, Long> — allocates a Long wrapper object per update
+private final HashMap<String, Long> counters = new HashMap<>();
+
+@KafkaListener(topics = "ad.impressions", concurrency = "4")
+public void consume(ImpressionEvent event) {
+    counters.compute(event.getCampaignId(), (k, v) -> {
+        // v + 1 boxes long → Long object
+        // Every compute call allocates a new Long object
+        return v == null ? 1L : v + 1;
+    });
+}
+```
+
+**Result:** 83,000 Long objects allocated per second.
+
+**After:**
+```java
+// Eclipse Collections primitive map — stores raw long, NO boxing
+import org.eclipse.collections.impl.map.mutable.primitive.ObjectLongHashMap;
+
+private final ObjectLongHashMap<String> campaignCounters = new ObjectLongHashMap<>();
+
+@KafkaListener(topics = "ad.impressions", concurrency = "4")
+public void consume(ImpressionEvent event) {
+    // Zero object allocation — updates raw long value in place
+    campaignCounters.addToValue(event.getCampaignId(), 1L);
+}
+```
+
+**Impact:** Eliminated 83K Long allocations/sec.
+
+---
+
+### Fix 2: Reuse Deserialization Object Instead of Allocating New One Per Message
+
+**Before:**
+```java
+@KafkaListener(topics = "ad.impressions", concurrency = "4")
+public void consume(ConsumerRecord<String, byte[]> record) {
+    // New ImpressionEvent allocated for EVERY message
+    // At 83K/sec, this fills Eden in 80ms
+    ImpressionEvent event = MAPPER.readValue(
+        record.value(), 
+        ImpressionEvent.class
+    );
+    
+    processEvent(event);
+}
+```
+
+**After:**
+```java
+// One ImpressionEvent object per consumer thread (4 threads total)
+// Reused for every message
+private static final ThreadLocal<ImpressionEvent> REUSABLE_EVENT =
+        ThreadLocal.withInitial(ImpressionEvent::new);
+
+private static final ObjectReader EVENT_READER = 
+        MAPPER.readerForUpdating(null);
+
+@KafkaListener(topics = "ad.impressions", concurrency = "4")
+public void consume(ConsumerRecord<String, byte[]> record) {
+    // Get thread-local instance (already created)
+    ImpressionEvent event = REUSABLE_EVENT.get();
+    
+    // Jackson updates fields in place instead of creating new object
+    EVENT_READER.withValueToUpdate(event).readValue(record.value());
+    
+    processEvent(event);
+}
+```
+
+**How It Works:**
+- Thread 1 gets ImpressionEvent instance A
+- Thread 1 deserializes message 1 → fields overwritten in place
+- Thread 1 deserializes message 2 → same instance A, fields overwritten again
+- Zero new object allocation
+
+**Impact:** Eliminated 83K ImpressionEvent allocations/sec.
+
+---
+
+### Fix 3: Add Semaphore for Backpressure on ScyllaDB Writes
+
+**Before:**
+```java
+public void writeToScylla(ImpressionEvent event) {
+    // Unbounded async write
+    // If ScyllaDB is slow, futures accumulate
+    scyllaSession.executeAsync(buildStatement(event))
+            .whenComplete((rs, ex) -> {
+                // callback
+            });
+    // Returns immediately, no wait
+}
+
+// During ScyllaDB compaction:
+// Thousands of futures pile up in heap
+// Each holding reference to event payload
+```
+
+**After:**
+```java
+// Max 500 in-flight async writes
+// If ScyllaDB is slow, consumer thread blocks (deliberate backpressure)
+private final Semaphore scyllaPermits = new Semaphore(500);
+
+public void writeToScylla(ImpressionEvent event) {
+    try {
+        // Acquire permit — blocks if 500 already in flight
+        scyllaPermits.acquire();
+        
+        scyllaSession.executeAsync(buildStatement(event))
+                .whenComplete((rs, ex) -> {
+                    // Release permit when write completes
+                    scyllaPermits.release();
+                });
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new RuntimeException(e);
+    }
+}
+```
+
+**What Happens:**
+```
+Normal load: 100 futures in flight → consumer runs freely
+ScyllaDB compaction: future count grows → at 500, consumer blocks
+ScyllaDB resumes: futures complete → permits released → consumer unblocks
+
+Result: No unbounded queue growth in heap
+```
+
+**Impact:** Bounded in-flight writes, prevents Old Gen bloat during throttling.
+
+---
+
+### Fix 4: Fix Prometheus Label Cardinality
+
+**Before:**
+```java
+// High cardinality labels = memory explosion
+Counter.builder("ad.impressions.processed")
+        .tag("campaign_id", event.getCampaignId())  // 50,000+ unique values
+        .register(registry)
+        .increment();
+
+// Result: 50,000+ time series in Micrometer registry
+//         ~1.8GB of heap
+```
+
+**After:**
+```java
+// Only bounded categorical labels
+Counter.builder("ad.impressions.processed")
+        .tag("advertiser_tier", event.getAdvertiserTier())  // "premium", "standard", "house"
+        .tag("ad_format", event.getAdFormat())              // "display", "video", "native"
+        .register(registry)
+        .increment();
+
+// Result: 3 × 3 = 9 time series in memory
+//         ~5 MB of heap
+
+// Per-campaign granular counts go to ScyllaDB for reporting, not Prometheus
+// (Prometheus is for monitoring, not detailed analytics)
+```
+
+**Impact:** Freed ~1.8GB of heap from Prometheus metadata.
+
+---
+
+### Fix 5: Right GC Algorithm for Each Service Type
+
+**For Vert.x AdServer** (latency-sensitive):
+```bash
+# ZGC: sub-millisecond pause times (target: <1ms)
+java -XX:+UseZGC \
+     -Xms4g -Xmx4g \
+     -XX:SoftMaxHeapSize=3500m \
+     -Xlog:gc*:file=/var/log/gc.log:time,uptime,level
+```
+
+**For Spring Boot Analytics** (throughput-focused):
+```bash
+# G1GC: balanced latency and throughput
+java -XX:+UseG1GC \
+     -XX:MaxGCPauseMillis=100 \
+     -XX:G1HeapRegionSize=16m \
+     -XX:InitiatingHeapOccupancyPercent=40 \
+     -Xlog:gc*:file=/var/log/gc.log:time,uptime,level,tags:filecount=5,filesize=20m
+```
+
+---
+
+### Fix 6: Kubernetes Memory Limits (Critical!)
+
+**Common Mistake:**
+```yaml
+resources:
+  limits:
+    memory: "4Gi"  # Set equal to -Xmx
+```
+
+**Why This Fails:**
+```
+JVM uses memory outside the heap:
+├─ Heap (-Xmx)              → 4096 MB
+├─ Metaspace               → 256-512 MB
+├─ Thread stacks           → (thread count × 512 KB) = ~512 MB
+├─ Direct/Off-heap buffers → 512 MB (Netty/Vert.x)
+├─ JIT code cache          → 256 MB
+└─ Kubernetes overhead     → ~100 MB
+
+Total: 4096 + 512 + 512 + 512 + 256 + 100 = ~5,988 MB
+
+If limit = 4Gi (4096 MB):
+  Off-heap usage = 5988 - 4096 = 1892 MB exceeds limit
+  → Kubernetes OOMKills pod even though heap is fine
+```
+
+**Correct Config:**
+```yaml
+resources:
+  requests:
+    memory: "5Gi"   # Actual Pod needs this
+  limits:
+    memory: "6Gi"   # Safety margin above actual usage
+    
+jvm:
+  -Xmx: "4g"       # Heap size
+  # Total: 4 (heap) + 2 (off-heap/metaspace) + 0.5 (safety) = 6.5 but set to 6
+```
+
+**Formula:**
+```
+Memory Limit = Xmx + (Metaspace: 512MB) 
+             + (Off-heap: 512MB)
+             + (Thread stacks: thread_count × 0.5MB)
+             + (JIT: 256MB)
+             + (Safety margin: 10%)
+             
+For Xmx=4g with 20 threads:
+= 4096 + 512 + 512 + (20 × 0.5) + 256 + 10%
+= 5428 MB → set limit to 6Gi
+```
+
+---
+
+## Results
+
+| Metric | Before Fix | After Fix |
+|--------|-----------|-----------|
+| GC pause time (max) | 1.8s | 120ms |
+| Full GC frequency | Every 3-4 min | Every 45-60 min |
+| Heap utilization (steady state) | Growing → OOM | Stable at 60% |
+| Object allocations/sec | 400K+ | 50K (primitive ops) |
+| ScyllaDB futures in queue | Unbounded (5000+) | Bounded (≤500) |
+| Prometheus memory | 1.8GB | 5MB |
+| OOMKill frequency | Every 4-6 hours | Never |
+
+---
+
+## Interview Answer
+
+> *"Our Analytics Ingestion Service was getting OOMKilled every 4-6 hours. Grafana showed a classic sawtooth heap pattern with increasing amplitude — Full GC pauses growing from 800ms to 1.8 seconds. We identified three root causes using Async Profiler and Prometheus cardinality checks.*
+>
+> *First, we were allocating a new `ImpressionEvent` object per Kafka message at 83K/sec. Jackson deserialization, plus boxed Long objects from HashMap.compute(). Eden filled in 80ms. We fixed it with ThreadLocal object reuse — one instance per consumer thread, with Jackson's `readerForUpdating` to mutate fields in place instead of allocating new objects.*
+>
+> *Second, unbounded ScyllaDB `executeAsync` calls with no backpressure. When ScyllaDB throttled (compaction, node coordination), thousands of futures accumulated in heap, each holding a full event payload. We added a Semaphore(500) for deliberate backpressure — consumer thread blocks if 500 writes are in flight, preventing Old Gen bloat.*
+>
+> *Third, high-cardinality Prometheus labels. We were tagging by campaign_id with 50,000+ unique values — creating 50,000+ time series in Micrometer registry, 1.8GB of heap competing with the application. We replaced it with bounded categorical labels (advertiser_tier, ad_format — 9 combinations total) and moved per-campaign granular counts to ScyllaDB reporting instead.*
+>
+> *Also, we were setting Kubernetes memory limits equal to Xmx and getting OOMKilled by off-heap growth — fixed by adding 2.5GB headroom for Metaspace, thread stacks, and Netty buffers. GC pauses dropped to 120ms, heap stabilized, and OOMKills stopped completely."*
 ---
 
 ## Cross-Incident Summary — The Patterns

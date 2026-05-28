@@ -912,6 +912,38 @@ public enum ConfigRegistry {
 
 ---
 * [x] **Singleton pattern - different ways to implement, thread-safe singleton**
+```java
+// Double-Checked Locking (Recommended)
+public class Singleton {
+  private static volatile Singleton instance;
+  private Singleton() {}
+  public static Singleton getInstance() {
+    if (instance == null) {
+      synchronized (Singleton.class) {
+        if (instance == null) {
+          instance = new Singleton();
+        }
+      }
+    }
+    return instance;
+  }
+}
+
+//Bill Pugh Singleton (Best Practice)
+public class Singleton {
+    private Singleton() {}
+
+    private static class Holder {
+        private static final Singleton INSTANCE = new Singleton();
+    }
+
+    public static Singleton getInstance() {
+        return Holder.INSTANCE;
+    }
+}
+
+
+```
 ---
 * [x] **Why Spring Singleton ≠ Gang of Four(GoF) Singleton pattern.**
     * GoF Singleton guarantees one instance per JVM, while Spring Singleton guarantees one instance per container. Spring deliberately avoids JVM singletons to preserve testability, DI, and lifecycle management.
