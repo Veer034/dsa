@@ -148,6 +148,9 @@
 * [ ] **What is the difference between `String`, `StringBuilder`, and `StringBuffer`?**
     * **`String`:** Immutable. Every `+` or `concat()` creates a new `String` object. Safe to share across threads without synchronization. Suitable when the string is not modified after creation.
     * **`StringBuilder`:** Mutable, **not thread-safe**. Backed by a resizable char array. Append/insert/delete are in-place with no new object creation. Use in single-threaded string-building (loops, builders, serializers).
+    * `StringBuilder stores data in a resizable array. In Java 8 it used char[]; in Java 9+ it uses byte[] plus an 
+      encoding flag to save memory for ASCII charcter use 1 byte and for UTF-16 use 2 bytes, erilier in char [], all index was taking 2 bytes. So by doing this it saves 50% of storage space. Appending writes into the 
+      existing array until capacity is exceeded, at which point a larger array is allocated and the contents are copied. This is why StringBuilder is much more efficient than repeated String concatenation.`
     * **`StringBuffer`:** Mutable, **thread-safe** (all methods are `synchronized`). Same API as `StringBuilder` but ~2–3× slower due to lock overhead. Only use when a mutable string truly needs to be shared across threads — which is rare. Prefer `StringBuilder` + external synchronization if needed.
     * **Production rule:** Use `StringBuilder` in hot loops. The compiler auto-optimizes single-line `+` to `StringBuilder`, but **loop-based `+` concatenation is not optimized** — each iteration allocates a new `String`. At 1B+/hour event volumes (like your Cisco pipeline), this is measurable GC pressure.
     ```java
@@ -216,16 +219,24 @@
 * [x] **Difference between HashMap, ConcurrentHashMap, and Hashtable**
     1. **HashMap**: Not thread-safe, fastest, allows **one null key and multiple null values**.
     2. **Hashtable**: Thread-safe using **method-level synchronization**, slower, **no null key/value** (legacy).
-    2. **ConcurrentHashMap**: Thread-safe with **fine-grained locking / lock-free reads**, high concurrency, **no null key/value**.
-    3. **Concurrency**: HashMap → none, Hashtable → full lock, ConcurrentHashMap → scalable concurrency.
-    4. **Use case**: HashMap (single thread), ConcurrentHashMap (multi-threaded), Hashtable (avoid; legacy).
+    3. **ConcurrentHashMap**: Thread-safe with **fine-grained locking / lock-free reads**, high concurrency, **no null key/value**.
+  ```java
+  map.get(key) == null
+  ```
+    In `ConcurrentHashMap`, `null` must mean **"key not present"**; if null keys/values were allowed, it would be 
+  impossible to distinguish between **"key absent"** and **"key mapped to null"** during concurrent operations.
+
+   4. **Concurrency**: HashMap → none, Hashtable → full lock, ConcurrentHashMap → scalable concurrency.
+   5. **Use case**: HashMap (single thread), ConcurrentHashMap (multi-threaded), Hashtable (avoid; legacy).
 ---
 * [x] **HashSet vs LinkedHashSet vs CopyOnWriteArraySet**
     1. **HashSet**: No ordering, fastest for add/remove/contains; use when **order doesn’t matter**.
     2. **LinkedHashSet**: Maintains **insertion order** with slight overhead; use when **iteration order matters**.
     3. **CopyOnWriteArraySet**: **Thread-safe**, iteration without locks; very slow writes, fast reads.
-    4. Use **HashSet** for single-threaded performance, **LinkedHashSet** for ordered sets,
-    5. **CopyOnWriteArraySet** only for **read-heavy, rarely-updated concurrent** scenarios.
+    4. > **Copy-On-Write creates a new copy of the underlying data structure on every write, allowing lock-free reads at the cost of expensive writes.**
+    5. > **CopyOnWrite collections are thread-safe because writers create a new array and atomically replace the reference, while readers continue using an immutable snapshot without locking.**
+    6. Use **HashSet** for single-threaded performance, **LinkedHashSet** for ordered sets,
+    7. **CopyOnWriteArraySet** only for **read-heavy, rarely-updated concurrent** scenarios.
 
 ---
 * [x] **When to use ArrayList vs LinkedList?**
@@ -323,6 +334,14 @@ Collections.sort(students);  // sorts by id
 
 **Comparator** - Custom ordering outside the class:
 ```java
+
+Comparator<Student> byName = new Comparator<Student>() {
+    @Override
+    public int compare(Student s1, Student s2) {
+        return s1.name.compareTo(s2.name);
+        }
+};
+
 Comparator<Student> byName = (s1, s2) -> s1.name.compareTo(s2.name);
 
 Collections.sort(students, byName);  // sorts by name
@@ -359,6 +378,7 @@ Use Comparable for natural order, Comparator for flexibility.
     * **Memory:** `LinkedList` allocates a `Node` wrapper object per element (two pointer fields overhead + object header). `ArrayDeque` uses a resizable circular array — no per-element object allocation, much better cache locality.
     * **Performance:** `ArrayDeque` operations are O(1) amortized and CPU cache-friendly. `LinkedList` has O(1) at head/tail but poor cache performance due to pointer-chasing across non-contiguous heap memory.
     * **Null handling:** `ArrayDeque` does **not** allow `null` elements (fails fast). `LinkedList` allows nulls — which can mask bugs where `null` is returned as a sentinel.
+    * >ArrayDeque disallows null because methods like poll() use null as a special return value to indicate that the deque is empty.
     * **As a Stack:** Use `ArrayDeque.push()`/`pop()`. Never use the `Stack` class — it extends `Vector` and synchronizes every method (legacy, poor performance).
     * **As a Queue:** Use `ArrayDeque.offer()`/`poll()`. For bounded, thread-safe, blocking queues in producer-consumer systems use `ArrayBlockingQueue`.
 
@@ -380,6 +400,7 @@ Use Comparable for natural order, Comparator for flexibility.
 ---
 * [ ] **What is `CopyOnWriteArrayList`? When should you use it and when must you avoid it?**
     * `CopyOnWriteArrayList` is a thread-safe `List` where every write operation (add, set, remove) creates a **full copy of the underlying array**, applies the change to the copy, then atomically replaces the reference. Reads iterate over the snapshot array with no locking.
+    * > CopyOnWriteArrayList creates a new copy of the entire underlying array on every write operation (add, remove, set), making reads fast and writes expensive.
     * **When to use:** Read-heavy lists that change very rarely — event listener registries, static configuration lists, observer patterns. The "zero-lock read" makes it ideal when writes happen infrequently (e.g., once at startup, or once per minute).
     * **When to avoid:** Any write-heavy workload. A 100-element list copied on every write under high write throughput causes massive heap allocation and GC pressure. Also — iterators reflect the snapshot at iteration start and will **never** see writes made during iteration (fail-safe but potentially stale).
     * **Alternative for write-heavy concurrent lists:** `ConcurrentLinkedQueue` (lock-free), or a `ReentrantReadWriteLock`-guarded `ArrayList` with short critical sections.
@@ -388,6 +409,7 @@ Use Comparable for natural order, Comparator for flexibility.
 * [ ] **What is `PriorityQueue`? How does it work internally and what are its thread-safe alternatives?**
     * `PriorityQueue` is an unbounded priority heap. It **does not guarantee FIFO order** — it always returns the element with the smallest value (natural ordering or `Comparator`). Internally it is a **min-heap** stored in a resizable array. Parent node at index `i` has children at `2i+1` and `2i+2`.
     * `offer()` adds to the end and bubbles up (sift-up): O(log n). `poll()` removes the root, moves the last element to root, and sinks down (sift-down): O(log n). `peek()` is O(1) — just read index 0.
+    * > A Min Heap may rearrange elements on every insert and delete to restore the heap property, using heapify-up or heapify-down in O(log n) time.
     * **Not thread-safe.** Thread-safe alternatives:
         * `PriorityBlockingQueue` — unbounded, thread-safe, blocking `take()`. Use for producer-consumer where priority matters. Unbounded — monitor heap usage under burst load.
         * `DelayQueue` — elements become available only after their delay expires. Used for scheduling, retry-with-backoff, cache expiration.
@@ -734,16 +756,19 @@ With millions of virtual threads, `ThreadLocal` causes memory pressure since eac
   **One practical note:** if you need a `Callable` that always succeeds and returns nothing, `Callable<Void>` works — just `return null` at the end. But at that point `Runnable` is cleaner unless you specifically need the checked exception propagation.
 ---
 * [x] **What is ExecutorService? Types of thread pools?**
-    * **ExecutorService** is a high-level concurrency framework that manages a pool of worker threads and executes submitted tasks asynchronously.
-    * ExecutorService es = Executors.newFixedThreadPool(3);
-    * ExecutorService es = Executors.newCachedThreadPool();
-    * ExecutorService es = Executors.newSingleThreadExecutor();
-    * ScheduledExecutorService es =
-      Executors.newScheduledThreadPool(2);
-    * **newFixedThreadPool**() uses an unbounded queue, which can cause memory exhaustion under load; in production, a bounded ThreadPoolExecutor is safer.
-    * Better use this:
-        *
-    ```
+
+<img src="./img/executors.png" height="800" width="1200" alt="My diagram" >
+
+  * **ExecutorService** is a high-level concurrency framework that manages a pool of worker threads and executes submitted tasks asynchronously.
+  * ExecutorService es = Executors.newFixedThreadPool(3);
+  * ExecutorService es = Executors.newCachedThreadPool();
+  * ExecutorService es = Executors.newSingleThreadExecutor();
+  * ScheduledExecutorService es =
+    Executors.newScheduledThreadPool(2);
+  * **newFixedThreadPool**() uses an unbounded queue, which can cause memory exhaustion under load; in production, a bounded ThreadPoolExecutor is safer.
+  * Better use this:
+      *
+  ```
   ExecutorService es = new ThreadPoolExecutor(
   10,                     // corePoolSize
   10,                     // maximumPoolSize
@@ -970,27 +995,48 @@ semaphore.release();   // return permit
     * **Practical rule:** If two threads share a variable and there's no synchronization, lock, or volatile between them — you have **no JMM guarantee**. The reader may see any value.
 
 ---
-* [ ] **What is double-checked locking? Why was it broken without `volatile`, and how does it work correctly?**
-    * Double-checked locking is an optimization for lazy singleton initialization — check outside the lock, check again inside, initialize once:
+* [ ] **What is Double-Checked Locking (DCL)? Why was it broken without `volatile`, and how does it work correctly?**
+
+  * Double-checked locking is a pattern used for **lazy initialization of a singleton** while minimizing synchronization overhead. The singleton instance is checked once before acquiring the lock and again inside the synchronized block.
+
     ```java
-    // ❌ Broken without volatile (Java < 5 behavior still illustrates the bug)
+    // ❌ Broken without volatile
     private static Singleton instance;
+
     public static Singleton getInstance() {
-        if (instance == null) {              // Check 1 — no lock
+        if (instance == null) {              // First check (without lock)
             synchronized (Singleton.class) {
-                if (instance == null) {      // Check 2 — inside lock
-                    instance = new Singleton(); // ← problem here
+                if (instance == null) {      // Second check (with lock)
+                    instance = new Singleton();
                 }
             }
         }
         return instance;
     }
     ```
-    * **Why it breaks:** `instance = new Singleton()` is NOT atomic. JVM executes it as: (1) allocate memory, (2) write reference to `instance`, (3) run constructor. Steps 2 and 3 can be **reordered by JIT**. Another thread may see a non-null `instance` reference (step 2 done) but an incompletely constructed object (step 3 not done yet) — and use it.
-    * **Fix — `volatile` on the field:** `volatile` prevents the reordering. A write to a `volatile` field happens-before every subsequent read of it. The constructor call is guaranteed to complete before the reference is visible to other threads.
+
+  * **Why it was broken:**
+
+    Object creation is not an atomic operation. The JVM may perform:
+
+    1. Allocate memory for the object.
+    2. Assign the reference to `instance`.
+    3. Execute the constructor.
+
+    Steps **2 and 3 may be reordered** by the compiler/JIT/CPU.
+
+    As a result, another thread may observe a non-null `instance` reference before the constructor has completed, leading to access to a partially initialized object.
+
+  * **How `volatile` fixes it:**
+
+    `volatile` prevents the reordering of writes that would expose a partially constructed object. It also guarantees visibility of updates across threads.
+
+    A write to a volatile variable **happens-before** every subsequent read of that variable.
+
     ```java
-    // ✅ Correct double-checked locking
+    // ✅ Correct Double-Checked Locking (Java 5+)
     private static volatile Singleton instance;
+
     public static Singleton getInstance() {
         if (instance == null) {
             synchronized (Singleton.class) {
@@ -1002,31 +1048,45 @@ semaphore.release();   // return permit
         return instance;
     }
     ```
-    * **Better alternative:** Initialization-on-demand holder idiom — classloader guarantees thread-safe lazy initialization with no synchronization overhead:
+
+  * **Java version note:**
+    Double-checked locking became reliable starting with **Java 5**, when the Java Memory Model was updated and `volatile` semantics were strengthened.
+
+  * **Better alternatives:**
+
+    **Initialization-on-Demand Holder Idiom**
+
     ```java
     public class Singleton {
+
+        private Singleton() {}
+
         private static class Holder {
-            static final Singleton INSTANCE = new Singleton(); // classloader-guaranteed
+            private static final Singleton INSTANCE = new Singleton();
         }
-        public static Singleton getInstance() { return Holder.INSTANCE; }
+
+        public static Singleton getInstance() {
+            return Holder.INSTANCE;
+        }
     }
     ```
 
+      This approach is:
+      - Lazy initialized
+      - Thread-safe
+      - No explicit synchronization
+      - Relies on JVM class-loading guarantees
+
+      **Enum Singleton (recommended when possible)**
+
+    ```java
+    public enum Singleton {
+        INSTANCE;
+    }
+    ```
+
+      This is the simplest and safest singleton implementation in Java.
 ---
-* [ ] **How does `LongAdder` differ from `AtomicLong`? When should you use each?**
-    * Both provide thread-safe incrementing, but they solve different performance problems:
-    * **`AtomicLong`** uses a single CAS loop on one memory cell. Under low/moderate contention it's fast. Under **high contention** (many threads competing to increment the same cell), CAS failures pile up — threads spin-retry → CPU wasted on contention.
-    * **`LongAdder`** maintains a **base cell + an array of `Cell` objects**, one per contending thread (lazy-created). Each thread mostly increments its own cell with low contention. `sum()` reads and sums all cells. Contention is distributed, not concentrated.
-    * **`LongAdder` is faster under high contention**. `AtomicLong` is slightly faster when contention is low (no cell overhead) and provides a consistent current value (no `sum()` approximation).
-
-  | | `AtomicLong` | `LongAdder` |
-  |--|-------------|-------------|
-  | Read current value | `get()` — exact | `sum()` — approximate under concurrent updates |
-  | Throughput under contention | Degrades (CAS spin) | Scales linearly |
-  | Use case | Compare-and-swap logic, exact reads | Counters, metrics, stats |
-
-    * **Production rule:** Use `LongAdder` for metrics counters (request count, error count, ad impressions). Use `AtomicLong` when you need `compareAndSet()` logic or exact real-time reads.
-
 
 ### JVM & Memory Management
 
@@ -1034,87 +1094,6 @@ semaphore.release();   // return permit
     * `.java` (source code) → `.class` (bytecode by `javac`) → ClassLoader (loads & verifies class) → Runtime Data
       Areas (heap, stack, metaspace, PC) → Execution Engine (Interpreter runs first, JIT compiles hot code) → Native CPU (executes optimized machine instructions)
 
----
-* [x] **What are different memory areas in JVM? (Heap, Stack, Method Area, PC Register)**
-
-![Image](https://media.geeksforgeeks.org/wp-content/uploads/20190614230114/JVM-Architecture-diagram.jpg)
-
-![Image](https://miro.medium.com/1%2AsG2wIZg7SqyhKMKD1jxM9A.png)
-
-**Heap**
-
-* Memory where **objects and arrays are stored**.
-* **Shared by all threads**.
-* Managed by **Garbage Collector (GC)**.
-
-**Example**
-
-```java
-User u = new User();
-```
-
-`User` object is created in **Heap**.
-
----
-
-**Stack**
-
-* Each **thread has its own stack**.
-* Stores **method calls and local variables**.
-
-**Example**
-
-```java
-void add() {
-    int a = 10;
-}
-```
-
-`a` and method frame are stored in the **Stack**.
-
----
-
-**Method Area (Metaspace)**
-
-* Stores **class-level information**.
-* Includes:
-
-    * class metadata
-    * method definitions
-    * static variables
-
-**Example**
-
-```java
-class A {
-    static int x = 10;
-}
-```
-
-`x` and class structure are stored in **Metaspace**.
-
----
-
-**PC Register (Program Counter)**
-
-* Each **thread has its own PC register**.
-* Stores **which instruction the thread is currently executing**.
-* Helps resume execution after **context switch**.
-
-**Example**
-
-If a thread pauses while executing line 5, the **PC register remembers that position** so it can continue from there later.
-
----
-
-### Quick Summary
-
-| Memory      | Stores                           | Scope      |
-| ----------- | -------------------------------- | ---------- |
-| Heap        | Objects, arrays                  | Shared     |
-| Stack       | Method calls, local variables    | Per thread |
-| Metaspace   | Class metadata, static variables | Shared     |
-| PC Register | Current instruction address      | Per thread |
 
 ---
 * [x] **Explain Garbage Collection and types of GC (Serial, Parallel, CMS, G1, ZGC)**
@@ -1242,50 +1221,6 @@ Major GC is **slower** than Minor GC.
 
 ---
 
-## 5. Method Area & GC (PermGen → Metaspace)
-
-Method Area stores **class metadata, static variables, runtime constant pool**.
-
-### PermGen (Before Java 8)
-
-HotSpot implemented Method Area as **PermGen** — a fixed-size region inside GC-managed space.
-
-**Class unloading conditions** (all 3 must be true):
-1. All instances of the class are GC'd from heap
-2. The `ClassLoader` that loaded it is no longer reachable
-3. The `Class` object itself has no references
-
-**Problems:**
-- Fixed ceiling (`-XX:MaxPermSize`, default ~64–256MB) — had to predict upfront
-- Class unloading only happened during **Full GC** — not minor GC
-- Hot-reload frameworks (Tomcat redeploy, JRebel) constantly created new ClassLoaders → old class metadata accumulated → `OutOfMemoryError: PermGen space`
-- Bumping `-XX:MaxPermSize` delayed the problem but didn't fix it — you were still guessing a static number
-
-**GC behavior in PermGen vs Heap:**
-
-| | Heap | PermGen (Method Area) |
-|---|---|---|
-| What gets collected | Dead object instances | Dead/unloaded classes |
-| Frequency | Minor GC constantly, Full GC periodically | **Only during Full GC** |
-| Cost | Minor GC is fast | Expensive — full heap scan required |
-
-### Metaspace (Java 8+)
-
-PermGen was replaced with **Metaspace** — still the Method Area implementation, just backed by **native OS memory**.
-
-**Key differences:**
-
-| | PermGen | Metaspace |
-|---|---|---|
-| Memory | GC-managed heap | Native OS memory |
-| Size | Fixed ceiling | Grows dynamically |
-| Class unloading | Only on Full GC | **Immediately when ClassLoader dies** |
-| OOM risk | High in dynamic apps | Much lower |
-| Cap | Forced (`MaxPermSize`) | Opt-in (`-XX:MaxMetaspaceSize`) |
-
-**Bottom line:** The fix wasn't "make PermGen bigger" — it was "stop managing class metadata like heap objects." Metaspace frees class metadata as soon as the ClassLoader is gone, without waiting for Full GC.
-
----
 
 ## Simple Flow
 
@@ -1324,7 +1259,7 @@ Immediate cleanup — no GC needed
 
 ---
 * [x] **How would you identify and fix memory leaks?**
-    * In Kubernetes, memory leaks are identified via **Prometheus/Grafana JVM metrics** — if **heap usage after GC keeps increasing and pods get OOMKilled**, it indicates a leak. Root cause is found using **JFR or async-profiler**, not by running `jmap` on live pods (heap dumps cause STW pauses that make the problem worse).
+    * In Kubernetes, memory leaks are identified via **Prometheus/Grafana JVM metrics** — if **heap usage after GC keeps increasing and pods get OOMKilled**, it indicates a leak. Root cause is found using **JFR or async-profiler**, not by running `jmap` on live pods (heap dumps cause Stop-the-World(STW) pauses that make the problem worse).
     * **Step-by-step production diagnosis:**
         1. **Confirm the leak:** Graph `jvm_memory_used_bytes{area="heap"}` after each GC. A leak shows a **sawtooth pattern with rising troughs** — heap never fully reclaims after GC.
         2. **Capture a heap dump:** Enable `-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/` so the dump is automatic on OOM. Or trigger manually with `jcmd <pid> GC.heap_dump /tmp/dump.hprof` during elevated memory (not at OOM — process may die first).
@@ -2064,12 +1999,6 @@ try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
 
 ### Object-Oriented Design (OOP Depth)
 
-* [ ] **Explain SOLID principles with concrete Java examples. Where have you applied them?**
-    * **S — Single Responsibility:** A class has one reason to change. `OrderService` handles order business logic. `OrderRepository` handles persistence. `OrderEmailNotifier` handles emails. Don't mix them — when email templates change, only `OrderEmailNotifier` changes.
-    * **O — Open/Closed:** Open for extension, closed for modification. Strategy pattern: add new pricing algorithm by writing a new class (`CpmPricing`), not by modifying `AdPricer`. Use `interface` + DI over `switch` on type.
-    * **L — Liskov Substitution:** Subtypes must be substitutable for their base types without altering program correctness. A `Square extends Rectangle` that overrides `setWidth()` to also change height violates LSP — code that accepts `Rectangle` and calls `setWidth(5); setHeight(10)` gets unexpected area. Prefer composition over inheritance when IS-A doesn't hold perfectly.
-    * **I — Interface Segregation:** Clients should not depend on interfaces they don't use. One fat `UserService` interface with 20 methods forces every implementor to implement all 20. Split into `UserReader`, `UserWriter`, `UserAuthenticator` — implementors and consumers only depend on what they need.
-    * **D — Dependency Inversion:** High-level modules should not depend on low-level modules; both should depend on abstractions. `OrderService` depends on `OrderRepository` interface, not `JpaOrderRepository` concrete class. You can swap the DB or mock the repo in tests without touching `OrderService`.
 
 ---
 * [ ] **What is the difference between composition and inheritance? When do you use each?**
@@ -2101,13 +2030,6 @@ try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
 
 ### Production Scenarios & System Design in Java
 
-* [ ] **You have a service processing 5M requests/hour. A memory usage spike occurs every 4 hours and the pod restarts. Walk through your diagnosis.**
-    * **Step 1 — Rule out GC behavior:** Check if the spike aligns with a Full GC. If heap was previously stable and then Full GC starts failing to reclaim, it's a leak. If heap was always near capacity and Full GC triggers OOM — it's undersized heap, not a leak. Different fixes.
-    * **Step 2 — Check Metaspace:** If `-XX:MaxMetaspaceSize` is not set and the service hot-reloads classes (custom ClassLoaders, reflection-heavy frameworks), Metaspace grows unbounded until OOM. Check `jvm_memory_used_bytes{area="nonheap"}` trend.
-    * **Step 3 — Capture heap dump at spike, not at OOM:** Set `-XX:+HeapDumpOnOutOfMemoryError`. Better: trigger `jcmd <pid> GC.heap_dump` when memory is at 85% (alert threshold) — the process is still alive and the dump is analyzable.
-    * **Step 4 — Analyze with Eclipse MAT:** Look at "Dominator Tree". 4-hour cycle suggests a **batch job or scheduled task accumulating data** — a `List` or `Map` that grows per cycle and is never cleared. Common in report generation, audit log batching, or Kafka consumer offset maps.
-    * **Step 5 — Check ThreadLocal:** Scheduled tasks running in a thread pool may set `ThreadLocal` values and not clean them. At 4-hour intervals, pool threads accumulate stale values.
-    * **Fix pattern:** Add memory trend alerting at 75% heap. Fix the root cause. Validate by watching GC trough baseline stay flat over 24h+ under production load.
 
 ---
 * [ ] **How would you implement a thread-safe, fixed-size, bounded LRU cache in Java without using any external library?**

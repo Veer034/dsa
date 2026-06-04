@@ -51,10 +51,44 @@ k = -log2(0.01) ≈ 6.64 ≈ 7
 
 ## Example Result
 
-For `n = 1,000,000` and `p = 0.01`:
-
-* `m ≈ 9.6 million bits` (~1.2 MB)
-* `k ≈ 7`
+  ```
+  # Bloom Filter Size Calculation
+  
+  Given:
+  
+  - n = 1,000,000
+  - p = 0.01 (1%)
+  
+  Formula:
+  
+  m = -(n × ln(p)) / (ln(2)^2) # Natural log taken with base 2.71828
+  
+  Calculation:
+  
+  m = -(1,000,000 × ln(0.01)) / (ln(2)^2) 
+  
+  m ≈ 9,585,058 bits
+  
+  Memory Required:
+  
+  - Bits: 9,585,058       
+  - Bytes: 1,198,132        8 bits = 1 Byte
+  - MB: 1.14 MB             1 MB = 1024 Kilo Bytes = 1024 * 1024 Bytes
+  
+  Hash Functions:
+  
+  k = (m / n) × ln(2)
+  
+  k ≈ 6.64 ≈ 7
+  
+  ## Result
+  
+  For 1,000,000 items with 1% false positive rate:
+  
+  - Bloom Filter Size: 9,585,058 bits
+  - Memory: ~1.14 MB
+  - Hash Functions: 7
+  ```
 
 ## Summary
 
@@ -74,14 +108,26 @@ For `n = 1,000,000` and `p = 0.01`:
 ```
 Question: "Has user123 been rate-limited in the last hour?"
 
+
 Without Bloom Filter:
-- Store all rate-limited users in Redis/Database
-- Memory: 1M users × 16 bytes = 16 MB
+  - Store all rate-limited user IDs in a Redis Set
+  - Assume average user ID length = 16 bytes
+  - Redis object, hash table, pointer, and allocator overhead can add 40–100+ bytes per entry
+  - Approximate memory per user = 60–120 bytes
+  
+  Calculation:
+  
+  1,000,000 users × 80 bytes
+  ≈ 80,000,000 bytes
+  ≈ 76 MB
+  
+  Typical Redis memory usage:
+  ≈ 60–120 MB for 1 million user IDs
 
 With Bloom Filter:
-- Store only probabilistic bits
-- Memory: 1M users × 10 bits = 1.25 MB (87% savings!)
-- Trade-off: 1% false positive (1 in 100 users wrongly flagged)
+  - Store only probabilistic bits
+  - Memory: 1M users × 10 bits = 1.25 MB (98.4% savings!)
+  - Trade-off: 1% false positive (1 in 100 users wrongly flagged)
 ```
 
 ---

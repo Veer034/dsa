@@ -370,7 +370,7 @@ SoftReference<byte[]> cache = new SoftReference<>(new byte[1024]);
 #### The Problem First
 GC needs to move objects around and update references. If your application threads keep running while GC moves objects, a thread might read a stale reference to a location that was just moved. Data corruption. So JVM stops all threads — Stop The World.
 
-#### Why STW is Unavoidable for Some Phases
+#### Why Stop-the-World(STW) is Unavoidable for Some Phases
 
 During **compaction**, GC moves `UserService` from address `0x1000` to `0x2000`. Every reference in the heap pointing to `0x1000` must be updated to `0x2000`. If Thread 1 is mid-read of that reference while GC updates it — you get a corrupted pointer. There is no safe way to do this concurrently without stopping threads.
 
@@ -426,7 +426,7 @@ Tools: GCViewer, GCEasy, Java Flight Recorder (JFR).
 ### Q6. G1GC vs ZGC — What they are and when to pick which
 
 #### The Problem First
-The basic Mark-Sweep-Compact GC stops your entire application. For large heaps this pause grows with heap size — 8GB heap, several seconds of pause. You need GC algorithms that reduce or eliminate STW pauses.
+The basic Mark-Sweep-Compact GC stops your entire application. For large heaps this pause grows with heap size — 8GB heap, several seconds of pause. You need GC algorithms that reduce or eliminate Stop-the-World(STW) pauses.
 
 #### G1GC — Region Based GC
 
@@ -440,7 +440,8 @@ Heap with G1:
 E=Eden  S=Survivor  O=Old  F=Free
 ```
 
-Any region can play any role. G1 tracks how much garbage each region contains and **collects the most garbage-dense regions first** (that's where the name "Garbage First" comes from).
+Any region can play any role. G1 tracks how much garbage each region contains and **collects the most garbage-dense 
+regions first** (that's where the name "Garbage First" comes from). After sometime these region can change to new type.
 
 **Key feature — Concurrent Marking:**
 G1 does most of the mark phase **concurrently** — while your application runs. Only a small final re-mark phase requires STW. This keeps pauses short and predictable.
@@ -448,7 +449,7 @@ G1 does most of the mark phase **concurrently** — while your application runs.
 **You configure a pause target:**
 ```
 -XX:MaxGCPauseMillis=200  // tell G1 "try to keep pauses under 200ms"
-```
+````
 G1 adjusts how many regions to collect per cycle to stay within that budget.
 
 **When to use G1:**
@@ -470,7 +471,7 @@ App running ──────────────────────�
              mark           relocate    ref update
              (no pause)     (no pause)  (no pause)
                                               ↑
-                                         tiny STW (~1ms)
+                                         tiny Stop-the-World(STW) (~1ms)
                                          for root scanning
 ```
 
@@ -493,7 +494,7 @@ App running ──────────────────────�
 | Use case | General purpose | Latency critical |
 
 #### How to Explain in Interview
-> "G1 divides the heap into equal-sized regions and collects the most garbage-dense regions first — Garbage First. It does concurrent marking while the app runs, keeping STW pauses short and predictable. You give it a pause target like 200ms and it tries to stay within it. ZGC goes further — it does marking, relocation, and reference updating all concurrently using load barriers. Pauses stay under 1ms regardless of heap size. The trade-off is ~5–10% extra CPU overhead from the load barriers. I'd use G1 for most services. For latency-critical paths — like our ad decisioning engine at Zee5 — ZGC is the right call."
+> "G1 divides the heap into equal-sized regions and collects the most garbage-dense regions first — Garbage First. It does concurrent marking while the app runs, keeping Stop-the-World(STW) pauses short and predictable. You give it a pause target like 200ms and it tries to stay within it. ZGC goes further — it does marking, relocation, and reference updating all concurrently using load barriers. Pauses stay under 1ms regardless of heap size. The trade-off is ~5–10% extra CPU overhead from the load barriers. I'd use G1 for most services. For latency-critical paths — like our ad decisioning engine at Zee5 — ZGC is the right call."
 
 ---
 
@@ -925,7 +926,8 @@ All three threads are fighting over the **same c1 object's Mark Word**.
 
 ### T1 arrives first — Biased Lock
 
-T1 looks at c1's Mark Word — it is unlocked. T1 does a CAS and writes its own thread ID into the Mark Word.
+T1 looks at c1's Mark Word — it is unlocked. T1 does a Compare And Swap (CAS) and writes its own thread ID into the 
+Mark Word.
 
 ```
 c1 Mark Word:
@@ -2821,7 +2823,7 @@ completeOnTimeout          → return default after timeout
 |---|---|
 | JIT | Compiles hot methods to native code after ~10K calls; caches in Code Cache |
 | GC Roots | Thread stacks, static fields, active threads — always-live starting points for GC |
-| STW Pause | All threads frozen while GC marks and compacts — Minor GC ~10ms, Full GC seconds |
+| Stop-the-World(STW) Pause | All threads frozen while GC marks and compacts — Minor GC ~10ms, Full GC seconds |
 | G1GC | Region-based, concurrent marking, tunable pause target — general purpose |
 | ZGC | Concurrent everything via load barriers, <1ms pause, 5-10% CPU overhead — latency critical |
 | Biased Lock | Single thread owns object — mark word stores thread ID, ~1ns acquisition |
@@ -3744,7 +3746,7 @@ High `pending` count = DB connection pool exhausted → all threads stall waitin
 #### Common Root Causes for This Pattern
 1. **DB slow query** — missing index after data grew past threshold
 2. **Thread pool too small** — traffic spike exhausted threads
-3. **Memory leak** → Full GC → 3s STW pause
+3. **Memory leak** → Full GC → 3s Stop-the-World(STW) pause
 4. **Downstream timeout misconfigured** — calls waiting the full timeout instead of failing fast
 
 #### Interview Answer
