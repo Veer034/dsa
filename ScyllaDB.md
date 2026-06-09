@@ -372,6 +372,235 @@ Be honest in an interview — knowing the limits shows real experience.
 - ❌ **Frequent schema changes** — schema-first design discipline required
 
 ---
+## Failure Handling — What Happens When a Shard or Node Crashes
+
+
+
+### Scenario 1: A Single Shard Crashes
+
+A shard crash means one CPU core's process died on a node. The node itself is still up.
+
+**What ScyllaDB does immediately:**
+
+ScyllaDB's process model means if one shard crashes, the entire node process restarts — ScyllaDB does not run shards as isolated processes that can die independently. When the node restarts, each shard replays its **Commit Log** to recover any writes that were in the MemTable but not yet flushed to an SSTable.
+
+```
+Normal state (Node B, 4 shards):
+┌─────────────────────────────────────┐
+│            Node B                   │
+│  Shard 0 ✓  Shard 1 ✓              │
+│  Shard 2 ✓  Shard 3 ✓              │
+└─────────────────────────────────────┘
+
+Shard 2 crashes → entire node restarts:
+┌─────────────────────────────────────┐
+│  Node B (restarting...)             │
+│                                     │
+│  Each shard replays its Commit Log  │
+│  to recover MemTable writes         │
+│                                     │
+│  Commit Log = the safety net        │
+│  "I wrote it to disk before RAM,    │
+│   so nothing is lost"               │
+└─────────────────────────────────────┘
+
+Node B comes back up:
+┌─────────────────────────────────────┐
+│            Node B                   │
+│  Shard 0 ✓  Shard 1 ✓              │
+│  Shard 2 ✓  Shard 3 ✓  (recovered) │
+└─────────────────────────────────────┘
+```
+
+**Why no data is lost:** Every write hits the Commit Log on disk *before* it goes into the MemTable in RAM. So even if a shard crashes mid-flight with unflushed MemTable data, the Commit Log has a record of every write. On restart, ScyllaDB reads the Commit Log and rebuilds the MemTable state.
+
+**What about requests in flight during the restart?** This is where Replication Factor saves you. While Node B is restarting (usually takes seconds), the client driver detects the node is temporarily unreachable and routes requests to the other replicas that hold the same data (Node A and Node C if RF=3). The client sees no downtime.
+
+---
+
+### Scenario 2: An Entire Node Crashes
+
+This is the more serious case. The whole machine is gone — all shards, all MemTables, all in-flight requests.
+
+```
+Before crash (RF=3, 4 nodes):
+
+  Key "user123" is stored on: Node B (primary), Node C, Node D
+
+  Node A        Node B        Node C        Node D
+  ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐
+  │  ✓   │      │  ✓   │      │  ✓   │      │  ✓   │
+  │      │      │ owns │      │ copy │      │ copy │
+  │      │      │user123      │user123      │user123
+  └──────┘      └──────┘      └──────┘      └──────┘
+
+Node B crashes:
+
+  Node A        Node B        Node C        Node D
+  ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐
+  │  ✓   │      │  ✗   │      │  ✓   │      │  ✓   │
+  │      │      │ DEAD │      │ copy │      │ copy │
+  │      │      │      │      │user123      │user123
+  └──────┘      └──────┘      └──────┘      └──────┘
+
+user123 is still readable from Node C or Node D.
+Writes still go to Node C and Node D.
+Cluster keeps running.
+```
+
+**How reads and writes continue during the outage:**
+
+The client driver uses the token to know which nodes own the data. When Node B is unreachable, the driver sends the request to the next replica in the ring. If consistency level is `QUORUM` (2 out of 3 replicas), the cluster remains fully operational as long as 2 of the 3 replicas are alive.
+
+```
+Write with CL=QUORUM, RF=3, Node B dead:
+
+Client → Coordinator
+              │
+              ├──→ Node B  ✗ (dead, skip)
+              ├──→ Node C  ✓ (ack)
+              └──→ Node D  ✓ (ack)
+
+2 acks received = QUORUM satisfied = success returned to client
+Node B is missed — handled by Hinted Handoff
+```
+
+---
+
+### Hinted Handoff — Writes During Node Downtime
+
+> **Hinted Handoff** — When a node is down, the coordinator that tried to write to it saves a small record called a "hint" locally. The hint contains the full write that the dead node missed. When the dead node comes back up and rejoins the cluster, the coordinator replays all its saved hints to that node, bringing it back in sync. Hints are stored for up to 3 hours by default. If the node is down longer than that, hints are discarded and a manual repair is needed.
+
+```
+Node B down for 20 minutes:
+
+Coordinator saves hint:
+┌────────────────────────────────────┐
+│  Hint stored on Coordinator        │
+│  "Node B missed these writes:      │
+│   user123 → {name: Alice} @ 10:05  │
+│   user456 → {name: Bob}   @ 10:07  │
+│   user789 → {name: Carol} @ 10:09" │
+└────────────────────────────────────┘
+
+Node B comes back at 10:25:
+┌────────────────────────────────────┐
+│  Coordinator detects Node B is up  │
+│  Replays all saved hints to Node B │
+│  Node B is now fully caught up     │
+└────────────────────────────────────┘
+```
+
+---
+
+### Anti-Entropy Repair — When Hints Are Not Enough
+
+If a node is down for longer than the hint window (3 hours), or if hints were lost, the node comes back with stale or missing data. ScyllaDB has a repair mechanism for this.
+
+> **nodetool repair** — A manual (or scheduled) operation that compares data between replicas using Merkle trees. A Merkle tree is a hash tree where each node in the tree is a hash of its children — it lets two nodes quickly identify *which* ranges of data differ without having to compare every row. Only the mismatched ranges are synced.
+
+```
+Node B back after 6 hours (hints expired):
+
+ScyllaDB runs repair between Node B and Node C:
+
+Step 1: Build Merkle trees
+  Node B: hash(token range 250–499) = 0xAB12
+  Node C: hash(token range 250–499) = 0xFF99
+  Hashes differ → data diverged in this range
+
+Step 2: Find exact mismatches
+  Compare sub-ranges recursively
+  Find the specific rows that differ
+
+Step 3: Sync only the diff
+  Node C sends missing/newer rows to Node B
+  Node B is now consistent
+
+No need to copy all data — only what diverged
+```
+
+**Repair schedule:** Run `nodetool repair` on each node at least once per `gc_grace_seconds` period (default 10 days). If you don't repair within that window, tombstones may be forgotten and deleted data can "resurrect" on rejoining nodes.
+
+---
+
+### Node Replacement — When a Node Is Permanently Lost
+
+If the machine is gone for good (hardware failure, terminated cloud instance):
+
+```
+Step 1: Start a new node, tell it to replace the dead one
+  scylla --replace-address-first-boot=<DEAD_NODE_IP>
+
+Step 2: New node joins the ring at the same token position
+  Streams data from the surviving replicas (Node C, Node D)
+  that already hold copies of the dead node's data
+
+Step 3: New node is fully populated
+  Hinted handoffs are replayed
+  nodetool repair to catch any remaining gaps
+
+Step 4: Dead node is removed from the ring
+  nodetool removenode <dead-node-id>
+```
+
+```
+Dead: Node B (token range 250–499)
+
+New Node B' joins at same token range:
+  ← streams data from Node C and Node D →
+
+  Node A     Node B'    Node C     Node D
+  ┌──────┐   ┌──────┐   ┌──────┐   ┌──────┐
+  │  ✓   │   │stream│   │  ✓   │   │  ✓   │
+  │      │   │ ←──  │←──│copy  │   │copy  │
+  └──────┘   └──────┘   └──────┘   └──────┘
+                 │
+                 ▼
+             Node B' ✓ (fully restored)
+```
+
+---
+
+### Summary — What Protects You at Each Level
+
+```
+Threat                    Protection Mechanism
+─────────────────────     ──────────────────────────────────────
+MemTable lost (crash)  →  Commit Log replayed on restart
+Node down briefly      →  Hinted Handoff (up to 3 hours)
+Node down long         →  nodetool repair (Merkle tree sync)
+Node permanently dead  →  Replace node, stream from replicas
+All replicas for a key →  Cannot happen if RF ≥ 3 and CL < ALL
+```
+
+The core guarantee: **as long as you keep RF=3 and use QUORUM consistency, you can lose any single node at any time with zero data loss and zero downtime.**
+
+---
+
+## Quick Reference
+
+```
+When to use ScyllaDB:
+  ✅ High write/read throughput (millions ops/sec)
+  ✅ Low-latency SLA (p99 < 10ms)
+  ✅ Already on Cassandra and want better perf
+  ✅ Large time-series, IoT, event log data
+  ✅ Want to reduce node count vs Cassandra
+
+When NOT to use:
+  ❌ Need JOINs or ACID transactions
+  ❌ Small dataset
+  ❌ Purely relational data model
+  ❌ Ad-hoc analytics workloads
+```
+
+---
+
+# TOO MUCH DETAILS
+
+---
+
 
 ## Cassandra → ScyllaDB Migration (In Practice)
 
@@ -701,227 +930,9 @@ UPDATE config SET settings['timeout'] = '60s' WHERE service_id = ...;
 
 ---
 
-## Failure Handling — What Happens When a Shard or Node Crashes
 
-### Scenario 1: A Single Shard Crashes
-
-A shard crash means one CPU core's process died on a node. The node itself is still up.
-
-**What ScyllaDB does immediately:**
-
-ScyllaDB's process model means if one shard crashes, the entire node process restarts — ScyllaDB does not run shards as isolated processes that can die independently. When the node restarts, each shard replays its **Commit Log** to recover any writes that were in the MemTable but not yet flushed to an SSTable.
-
-```
-Normal state (Node B, 4 shards):
-┌─────────────────────────────────────┐
-│            Node B                   │
-│  Shard 0 ✓  Shard 1 ✓              │
-│  Shard 2 ✓  Shard 3 ✓              │
-└─────────────────────────────────────┘
-
-Shard 2 crashes → entire node restarts:
-┌─────────────────────────────────────┐
-│  Node B (restarting...)             │
-│                                     │
-│  Each shard replays its Commit Log  │
-│  to recover MemTable writes         │
-│                                     │
-│  Commit Log = the safety net        │
-│  "I wrote it to disk before RAM,    │
-│   so nothing is lost"               │
-└─────────────────────────────────────┘
-
-Node B comes back up:
-┌─────────────────────────────────────┐
-│            Node B                   │
-│  Shard 0 ✓  Shard 1 ✓              │
-│  Shard 2 ✓  Shard 3 ✓  (recovered) │
-└─────────────────────────────────────┘
-```
-
-**Why no data is lost:** Every write hits the Commit Log on disk *before* it goes into the MemTable in RAM. So even if a shard crashes mid-flight with unflushed MemTable data, the Commit Log has a record of every write. On restart, ScyllaDB reads the Commit Log and rebuilds the MemTable state.
-
-**What about requests in flight during the restart?** This is where Replication Factor saves you. While Node B is restarting (usually takes seconds), the client driver detects the node is temporarily unreachable and routes requests to the other replicas that hold the same data (Node A and Node C if RF=3). The client sees no downtime.
 
 ---
-
-### Scenario 2: An Entire Node Crashes
-
-This is the more serious case. The whole machine is gone — all shards, all MemTables, all in-flight requests.
-
-```
-Before crash (RF=3, 4 nodes):
-
-  Key "user123" is stored on: Node B (primary), Node C, Node D
-
-  Node A        Node B        Node C        Node D
-  ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐
-  │  ✓   │      │  ✓   │      │  ✓   │      │  ✓   │
-  │      │      │ owns │      │ copy │      │ copy │
-  │      │      │user123      │user123      │user123
-  └──────┘      └──────┘      └──────┘      └──────┘
-
-Node B crashes:
-
-  Node A        Node B        Node C        Node D
-  ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐
-  │  ✓   │      │  ✗   │      │  ✓   │      │  ✓   │
-  │      │      │ DEAD │      │ copy │      │ copy │
-  │      │      │      │      │user123      │user123
-  └──────┘      └──────┘      └──────┘      └──────┘
-
-user123 is still readable from Node C or Node D.
-Writes still go to Node C and Node D.
-Cluster keeps running.
-```
-
-**How reads and writes continue during the outage:**
-
-The client driver uses the token to know which nodes own the data. When Node B is unreachable, the driver sends the request to the next replica in the ring. If consistency level is `QUORUM` (2 out of 3 replicas), the cluster remains fully operational as long as 2 of the 3 replicas are alive.
-
-```
-Write with CL=QUORUM, RF=3, Node B dead:
-
-Client → Coordinator
-              │
-              ├──→ Node B  ✗ (dead, skip)
-              ├──→ Node C  ✓ (ack)
-              └──→ Node D  ✓ (ack)
-
-2 acks received = QUORUM satisfied = success returned to client
-Node B is missed — handled by Hinted Handoff
-```
-
----
-
-### Hinted Handoff — Writes During Node Downtime
-
-> **Hinted Handoff** — When a node is down, the coordinator that tried to write to it saves a small record called a "hint" locally. The hint contains the full write that the dead node missed. When the dead node comes back up and rejoins the cluster, the coordinator replays all its saved hints to that node, bringing it back in sync. Hints are stored for up to 3 hours by default. If the node is down longer than that, hints are discarded and a manual repair is needed.
-
-```
-Node B down for 20 minutes:
-
-Coordinator saves hint:
-┌────────────────────────────────────┐
-│  Hint stored on Coordinator        │
-│  "Node B missed these writes:      │
-│   user123 → {name: Alice} @ 10:05  │
-│   user456 → {name: Bob}   @ 10:07  │
-│   user789 → {name: Carol} @ 10:09" │
-└────────────────────────────────────┘
-
-Node B comes back at 10:25:
-┌────────────────────────────────────┐
-│  Coordinator detects Node B is up  │
-│  Replays all saved hints to Node B │
-│  Node B is now fully caught up     │
-└────────────────────────────────────┘
-```
-
----
-
-### Anti-Entropy Repair — When Hints Are Not Enough
-
-If a node is down for longer than the hint window (3 hours), or if hints were lost, the node comes back with stale or missing data. ScyllaDB has a repair mechanism for this.
-
-> **nodetool repair** — A manual (or scheduled) operation that compares data between replicas using Merkle trees. A Merkle tree is a hash tree where each node in the tree is a hash of its children — it lets two nodes quickly identify *which* ranges of data differ without having to compare every row. Only the mismatched ranges are synced.
-
-```
-Node B back after 6 hours (hints expired):
-
-ScyllaDB runs repair between Node B and Node C:
-
-Step 1: Build Merkle trees
-  Node B: hash(token range 250–499) = 0xAB12
-  Node C: hash(token range 250–499) = 0xFF99
-  Hashes differ → data diverged in this range
-
-Step 2: Find exact mismatches
-  Compare sub-ranges recursively
-  Find the specific rows that differ
-
-Step 3: Sync only the diff
-  Node C sends missing/newer rows to Node B
-  Node B is now consistent
-
-No need to copy all data — only what diverged
-```
-
-**Repair schedule:** Run `nodetool repair` on each node at least once per `gc_grace_seconds` period (default 10 days). If you don't repair within that window, tombstones may be forgotten and deleted data can "resurrect" on rejoining nodes.
-
----
-
-### Node Replacement — When a Node Is Permanently Lost
-
-If the machine is gone for good (hardware failure, terminated cloud instance):
-
-```
-Step 1: Start a new node, tell it to replace the dead one
-  scylla --replace-address-first-boot=<DEAD_NODE_IP>
-
-Step 2: New node joins the ring at the same token position
-  Streams data from the surviving replicas (Node C, Node D)
-  that already hold copies of the dead node's data
-
-Step 3: New node is fully populated
-  Hinted handoffs are replayed
-  nodetool repair to catch any remaining gaps
-
-Step 4: Dead node is removed from the ring
-  nodetool removenode <dead-node-id>
-```
-
-```
-Dead: Node B (token range 250–499)
-
-New Node B' joins at same token range:
-  ← streams data from Node C and Node D →
-
-  Node A     Node B'    Node C     Node D
-  ┌──────┐   ┌──────┐   ┌──────┐   ┌──────┐
-  │  ✓   │   │stream│   │  ✓   │   │  ✓   │
-  │      │   │ ←──  │←──│copy  │   │copy  │
-  └──────┘   └──────┘   └──────┘   └──────┘
-                 │
-                 ▼
-             Node B' ✓ (fully restored)
-```
-
----
-
-### Summary — What Protects You at Each Level
-
-```
-Threat                    Protection Mechanism
-─────────────────────     ──────────────────────────────────────
-MemTable lost (crash)  →  Commit Log replayed on restart
-Node down briefly      →  Hinted Handoff (up to 3 hours)
-Node down long         →  nodetool repair (Merkle tree sync)
-Node permanently dead  →  Replace node, stream from replicas
-All replicas for a key →  Cannot happen if RF ≥ 3 and CL < ALL
-```
-
-The core guarantee: **as long as you keep RF=3 and use QUORUM consistency, you can lose any single node at any time with zero data loss and zero downtime.**
-
----
-
-## Quick Reference
-
-```
-When to use ScyllaDB:
-  ✅ High write/read throughput (millions ops/sec)
-  ✅ Low-latency SLA (p99 < 10ms)
-  ✅ Already on Cassandra and want better perf
-  ✅ Large time-series, IoT, event log data
-  ✅ Want to reduce node count vs Cassandra
-
-When NOT to use:
-  ❌ Need JOINs or ACID transactions
-  ❌ Small dataset
-  ❌ Purely relational data model
-  ❌ Ad-hoc analytics workloads
-```
-
 # Spring Boot CRUD with ScyllaDB
 ## Full Setup — Configuration, Driver, Entities, Repository, REST API
 

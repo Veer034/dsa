@@ -263,82 +263,6 @@ The config callouts at the bottom of each column show the levers you actually tu
             * 🔹 Highest durability, slightly higher latency.
             * Use case: payments, orders, critical data.
 
-    * **Production War Story — Follow-up (Expert): With `acks=all`, your producer latency spiked from 5ms to 800ms during a rolling broker restart. What was happening and how did you fix it without sacrificing durability?**
-        * **Root cause — ISR shrink during restart:** During a rolling restart, the restarting broker leaves ISR. If `min.insync.replicas=2` and RF=3, when 1 broker restarts, only 2 are in ISR — still fine. But if `replica.lag.time.max.ms` is too tight and the restarting broker is slow to rejoin ISR, you can temporarily have ISR=1 (just the leader). With `acks=all` + `min.insync.replicas=2`, the producer blocks waiting for a 2nd replica that isn’t available — requests pile up until timeout.
-        * **What actually caused 800ms latency:** `replica.lag.time.max.ms=10000` (default), but our restarting broker took 12s to fully replay its log and rejoin ISR. During those 12 seconds, every producer send with `acks=all` either blocked or threw `NotEnoughReplicasException`.
-        * **Fixes:**
-            ```properties
-            # Give replicas more time to rejoin ISR before being considered lagging
-            replica.lag.time.max.ms=30000
-
-            # Producer: don't wait forever, fail fast and let retry logic handle it
-            delivery.timeout.ms=30000
-            request.timeout.ms=5000
-            retries=2147483647
-            retry.backoff.ms=100
-            ```
-        * **Operational fix:** During planned rolling restarts, temporarily set `min.insync.replicas=1` via dynamic config for non-critical topics, then restore after restart completes. For payment topics — never reduce below 2.
-        * **Better long-term fix:** Pre-warm brokers before rejoining the cluster. Increase log segment size to reduce replay time. Use `unclean.leader.election.enable=false` always.
-
----
-* [x] **Explain idempotent producer**
-    * Idempotent producer prevents duplicate messages during retries by using producer IDs and sequence numbers.
-
-    * **Production War Story — Follow-up (Expert): You enabled `enable.idempotence=true` but still saw duplicate records in your consumer. How is that possible and where was the bug?**
-        * **Idempotent producer covers producer→broker duplication only.** It assigns each producer a `PID` (Producer ID) and a monotonically increasing sequence number per partition. If the broker receives the same (PID, partition, sequence) twice due to a retry, it deduplicates at the broker level.
-        * **Where it does NOT help:**
-            1. **Consumer-side reprocessing:** If the consumer crashes after processing but before committing the offset, it re-reads and reprocesses the same message. Idempotent producer has nothing to do with this — the consumer must be idempotent itself.
-            2. **Producer restart:** On JVM restart, the producer gets a **new PID**. The broker can no longer deduplicate against the old PID. Messages sent just before the crash that the broker already committed will be re-sent with a new PID and accepted as new records.
-            3. **Multiple producer instances:** Two pods with the same `transactional.id` will compete, but two pods without it produce independently — both can produce the same logical event if they both process the same upstream event (e.g., both read from the same DB row and produce without coordination).
-        * **The real fix for end-to-end exactly-once:** Combine `enable.idempotence=true` + `transactional.id` (for atomic produce+offset commit in Kafka Streams / read-process-write flows) + **consumer-side idempotency** using a deduplication key stored in Redis or DB with a TTL equal to your max expected redelivery window.
-        * **Production pattern for payment events:**
-        ```java
-        // Consumer side: check + process atomically
-        String dedupKey = "payment:" + record.key() + ":" + record.offset();
-        if (redis.setIfAbsent(dedupKey, "1", Duration.ofHours(24))) {
-            paymentService.process(record.value()); // only processes once
-        }
-        // else: silently skip duplicate
-        ```
-Here's the modified section with your follow-up question added inline:
-
-
----
-* [x] **What is producer batching and compression?**
-    * Batching reduces network calls by sending messages in bulk, and compression reduces payload size to improve Kafka throughput.
-    * Controlled by `batch.size` and `linger.ms`
-    * Messages for the same partition are batched together
-    * Producer compresses message batches before sending : gzip, snappy, lz4, zstd
-
-    * **Production War Story — Follow-up (Expert): You increased `linger.ms` from 0 to 20ms to improve batching, but your p99 producer latency went from 8ms to 180ms under certain traffic patterns. What happened?**
-        * **Root cause — batch accumulation under bursty traffic:** `linger.ms=20` means the producer waits up to 20ms to fill a batch before sending. Under bursty traffic, when messages arrive in bursts followed by quiet periods, every batch accumulates for the full 20ms even when it could have been sent earlier with just 3-4 messages.
-        * **Compound issue — `buffer.memory` exhaustion:** When downstream brokers were slow (GC pause), send buffers filled up. With `linger.ms=20`, batches accumulate longer, filling `buffer.memory` faster. Once full, the producer blocks for `max.block.ms` (default 60s) before throwing `TimeoutException`.
-        * **The right tuning approach:**
-   ```properties
-        # Start conservative
-        linger.ms=5                  # not 0 (wastes batching), not too high
-        batch.size=65536             # 64KB per batch — tune based on message size
-        compression.type=lz4         # fastest compression, ~2x ratio
-        buffer.memory=67108864       # 64MB — increase for high-throughput producers
-        max.block.ms=5000            # fail fast instead of blocking 60s
-   ```
-    * **Rule of thumb:** `linger.ms` should be <= your acceptable p99 latency budget minus broker processing time. For payment APIs: `linger.ms=0` (latency matters more than throughput). For event pipelines: `linger.ms=5-20` is fine.
-    * **Compression choice by use case:**
-        * `lz4` — best for high-throughput, CPU-sensitive producers (lowest CPU overhead)
-        * `zstd` — best compression ratio for archival topics (reduces storage costs)
-        * `snappy` — good middle ground, widely supported
-        * `gzip` — avoid for real-time; highest CPU, slowest compression
-
-    * **Follow-up: If `batch.size` and `linger.ms` are already configured, why does the producer still block for 60s?**
-        * **`batch.size`/`linger.ms` and `buffer.memory` solve different problems:**
-            * `batch.size` + `linger.ms` = controls *when* a batch is ready to send
-            * `buffer.memory` = the actual RAM pool where ALL pending batches sit waiting for the network thread to flush them to the broker
-        * **The block happens at memory allocation, not at batching.** When your app calls `producer.send()`, Kafka first tries to allocate space in `buffer.memory` for the new message. If `buffer.memory` is full (broker is slow, network thread is backed up), this allocation **blocks** — your app thread freezes here, before any batching even happens.
-        * **Why 60s?** `max.block.ms` defaults to 60,000ms. Kafka assumes the broker might recover soon and waits. Meanwhile your app thread is frozen.
-        * **The chain:** Broker slow → network thread can't drain buffer → `buffer.memory` fills up → `producer.send()` blocks on next message → your app hangs for up to 60s → `TimeoutException`
-        * **Fix:** `max.block.ms=5000` (fail fast in 5s) + increase `buffer.memory` so it takes longer to fill up
-
----
 
 * [x] **How to ensure message ordering in Kafka?**
     * Kafka guarantees ordering only per partition, so use the same key to route related messages to the same partition.
@@ -469,37 +393,6 @@ Here's the modified section with your follow-up question added inline:
         * Also sends heartbeats to keep the consumer alive.
         * Called repeatedly in a loop.
 
-### Performance & Reliability
-
-* [x] **How to achieve exactly-once semantics(EOS) in Kafka?**
-    * Kafka achieves exactly-once semantics using idempotent producers, transactions, and atomic offset commits in a read-process-write flow.
-    * **How Kafka achieves EOS**
-        * **Idempotent Producer:** Prevents duplicates during retries (enable.idempotence=true).
-        * **Transactions:** Producer writes to multiple partitions/topics atomically (transactional.id).
-        * Read–Process–Write in one transaction
-            * Consume records
-            * Produce results
-            * Commit consumer offsets as part of the same transaction
-        * **Atomic commit or abort:** Either all writes + offsets succeed, or nothing is visible.
-
-    * **Production War Story — Follow-up (Expert): You implemented EOS with `transactional.id` in your payment service. After a deployment, you saw `ProducerFencedException` flooding logs. What happened?**
-        * **What is `transactional.id` and epoch?** Kafka tracks every `transactional.id` with an internal counter called **epoch**. The epoch exists to prevent two producers with the same id from writing at the same time (zombie protection).
-        * **What happens on new producer init:** Every time a producer starts with the same `transactional.id`, Kafka **increments the epoch** and immediately **fences (invalidates)** the old producer. Any send from the old producer now throws `ProducerFencedException`.
-        * **The rolling deployment problem:**
-            1. Old pod running with `transactional.id=payment-producer-1`, epoch=5, mid-batch
-            2. New pod starts, initializes same `transactional.id=payment-producer-1` → Kafka bumps epoch to 6
-            3. Old pod tries to send next message → `ProducerFencedException` (epoch 5 is now dead)
-            4. Old pod didn't handle this → offset never committed → both pods reprocess same messages
-        * **Fix — make `transactional.id` stable and unique per partition, not per pod:**
-        ```java
-        // BAD — every pod restart gets fenced by the next pod
-        transactional.id = "payment-producer-1"  // same id, all pods
-
-        // GOOD — tie to partition, so only one producer ever owns it
-        transactional.id = "payment-service-" + assignedPartition  // e.g. payment-service-3
-        ```
-        * **Handle `ProducerFencedException` correctly:** It is NOT retryable. Close the producer and let the pod reinitialize. Never retry — the epoch is already dead.
-        * **EOS performance cost:** ~5-10ms latency per transaction commit. Only enable for business-critical topics (payments, inventory) — not for logs or analytics.
 
 ---
 * [x] **What is log compaction?**
@@ -526,47 +419,6 @@ Here's the modified section with your follow-up question added inline:
         delete.retention.ms=604800000  # 7 days — safe for most consumers
         ```
 
-
-* [x] **How to handle message retries?**
-    * message retries are handled at producer side and consumer side, depending on the failure type.
-    * **Producer-side retries**
-        * Enabled via `retries` and `retry.backoff.ms`.
-        * Used for transient broker/network failures.
-        * Idempotent producer prevents duplicates during retries.
-    * **Consumer-side retries**
-        * On processing failure, consumer can:
-            * Retry in-memory (limited attempts).
-            * Commit offset after success only (manual commit).
-            * Send message to a retry topic with delay.
-    * **Dead Letter Queue (DLQ)**
-        * Messages that fail after max retries are sent to a DLQ for analysis.
-        * Prevents blocking the main consumer.
-
-    * **Production War Story — Follow-up (Expert): Your consumer retry logic used `Thread.sleep()` for backoff between retries inside the `@KafkaListener` method. Under failure conditions, this caused cascading rebalances. Explain the mechanism and the correct retry architecture.**
-        * **What happened:** While `Thread.sleep(30_000)` was sleeping (30s backoff), the consumer’s `poll()` was not being called. Kafka’s `max.poll.interval.ms=30000` expired. Kafka declared the consumer dead and triggered a rebalance. The partition was reassigned to another consumer, which also failed and slept, triggering another rebalance. A 3-consumer group was rebalancing every 30 seconds — no messages processed, coordinator CPU spiked.
-        * **The correct retry architecture — retry topics:**
-        ```
-        orders (main)
-          → on failure → orders.retry.1 (delay: 1s)
-          → on failure → orders.retry.2 (delay: 30s)
-          → on failure → orders.retry.3 (delay: 5min)
-          → on failure → orders.DLQ
-        ```
-        * Spring Kafka’s `RetryTopicConfiguration` implements this pattern automatically:
-        ```java
-        @Bean
-        public RetryTopicConfiguration retryTopicConfig(KafkaTemplate<String, String> template) {
-            return RetryTopicConfigurationBuilder
-                .newInstance()
-                .exponentialBackoff(1000, 2, 300000) // 1s, 2s, 4s... max 5min
-                .maxAttempts(4)
-                .retryTopicSuffix(".retry")
-                .dltSuffix(".DLQ")
-                .create(template);
-        }
-        ```
-        * **Why retry topics work:** The failing message is immediately published to `orders.retry.1` and the original offset is committed. The main consumer continues processing other messages — no blocking, no sleep, no rebalance.
-        * **DLQ monitoring is non-negotiable:** Every message landing in DLQ must trigger an alert. DLQ messages represent data silently dropped from your processing pipeline. At a payments company, an unmonitored DLQ = missing transactions.
 
 ---
 * [x] **Explain back pressure handling in Kafka**
@@ -635,84 +487,6 @@ Here's the modified section with your follow-up question added inline:
 ---
 * [x] **What metrics do you track? (Throughput, latency, consumer lag)**
     * I primarily monitor throughput, latency, and consumer lag, supported by replication and broker health metrics to ensure Kafka stability.
----
-* [x] **How to handle rebalancing in consumer groups?**
-    * Rebalancing is handled by cooperative assignors, timely offset commits, and rebalance listeners to minimize disruption and reprocessing.
-
-![Image](https://camo.githubusercontent.com/2aaf02be2cd8d5f88aba6d9a61a501c5cbc81e9d79ce61ecab9afbb8666d6656/68747470733a2f2f696d6167652e6175746f6d712e636f6d2f77696b692f626c6f672f6b61666b612d726562616c616e63696e672d636f6e63657074732d626573742d7072616374696365732f312e706e67)
-
-![Image](https://cdn.confluent.io/wp-content/uploads/eager-rebalancing-protocol.jpg)
-
-![Image](https://tomlee.co/img/KafkaRebalance.png)
-
-In **Apache Kafka**, rebalancing occurs when consumers join/leave or partitions change.
-
-
-
-* **Use cooperative rebalancing** (`partition.assignment.strategy=cooperative-sticky`)
-  → Minimizes stop-the-world rebalances.
-* **Commit offsets before rebalance**
-  → Prevents message reprocessing.
-* **Implement `ConsumerRebalanceListener`**
-  → Gracefully stop processing and save state.
-* **Tune timeouts** (`session.timeout.ms`, `max.poll.interval.ms`)
-  → Avoid unnecessary rebalances.
-    * New consumer joins → only a few partitions move instead of all.
-
-    * **Production War Story — Follow-up (Expert): During peak traffic, a consumer group was experiencing a rebalance storm — rebalancing every 2-3 minutes continuously. No consumers were added or removed. What caused it and how did you stop it?**
-        * **Root cause — `max.poll.interval.ms` violation from slow processing:** The consumer was using `max.poll.records=500` and processing each record required a DB lookup averaging 8ms. 500 × 8ms = 4 seconds, but occasionally a slow DB query took 200ms, pushing total batch time to `500 × 200ms = 100 seconds`. `max.poll.interval.ms=30000` (30s default) expired — Kafka declared the consumer dead and rebalanced.
-        * **The vicious cycle:** On rebalance, other consumers got the reassigned partitions and also hit slow DB queries (the DB was under load) — triggering *their* max.poll.interval violations — causing cascading rebalances across the entire group.
-        * **Diagnosis:**
-        ```bash
-        # Look for frequent rebalance events in consumer logs
-        grep "Rebalancing" consumer.log | awk '{print $1,$2}' | uniq -c
-
-        # Check commit rate — if commits happen then stop for 30s, consumer is stuck
-        kafka-consumer-groups.sh --describe --group my-group
-        # Watch the LAG column: if it grows then suddenly drops by exact batch size, rebalance is happening
-        ```
-        * **Fixes applied:**
-        ```properties
-        # Reduce batch size to keep processing under max.poll.interval.ms
-        max.poll.records=50          # from 500 to 50 — 50 * 200ms = 10s, safely under 30s
-
-        # Or increase the interval to match realistic worst-case processing time
-        max.poll.interval.ms=300000  # 5 minutes for heavy processing
-
-        # Switch to cooperative-sticky to minimize partition movement on legitimate rebalances
-        partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor
-        ```
-        * **Cooperative-sticky assignor is critical at scale:** Eager rebalancing (default) stops ALL consumers in the group (stop-the-world) during rebalance. With 20 consumers and 200 partitions, eager rebalance = 20 consumers idle simultaneously. Cooperative rebalancing only revokes and reassigns the partitions that actually need to move — other consumers keep processing.
-        * **Heartbeat vs poll timeout — common confusion:**
-            * `heartbeat.interval.ms` / `session.timeout.ms` — for detecting consumer *crashes* (no heartbeat from background thread)
-            * `max.poll.interval.ms` — for detecting consumer *slowness* (foreground processing too slow between polls)
-            * These are independent. A consumer can send heartbeats normally while its processing loop is too slow — `max.poll.interval.ms` triggers even if heartbeats are healthy.
-
----
-* [x] **How to add/remove brokers from a cluster?**
-  ![Image](https://www.michael-noll.com/assets/uploads/kafka-cluster-overview.png)
-
-![Image](https://cdn.prod.website-files.com/68ed36e99e31581dedf5dcb1/690211c9f9eb9f1dc940f5e6_66a3d48228e3e933f5ee5e50_66880f0749f675709dbf3c22_guide-kafka-partition-img4.png)
-
-![Image](https://cdn.prod.website-files.com/6541750d4db1a741ed66738c/65df6ad7407e03459c1f6ec9_Apache_Kafka_data_Decommissioning%20Brokers.webp)
-
-In **Apache Kafka**, brokers can be added or removed **without downtime** using partition reassignment.
-
-* New Broker
-1. Start a **new broker** with a unique `broker.id`.
-2. Broker registers with the cluster.
-3. **Reassign partitions** to the new broker (manual or automated).
-4. Data is **rebalanced automatically**.
-
-
-* Removing a broker
-    1. **Trigger partition reassignment** to move data off the broker.
-    2. Wait until partitions are fully replicated elsewhere.
-    3. **Shutdown the broker safely**.
-
-* Tools
-    * Kafka reassignment tools / admin APIs
-    * Automated rebalancing in managed Kafka
 
 
 ---
@@ -724,36 +498,7 @@ In **Apache Kafka**, brokers can be added or removed **without downtime** using 
         * Only ISR members are eligible to become leader.
         * acks=all waits for all ISR replicas to acknowledge.
 
-    * **Production War Story — Follow-up (Expert): Your monitoring showed `UnderReplicatedPartitions > 0` for 20 minutes. The team ignored it thinking it was a transient blip. What were the actual downstream risks during those 20 minutes and what should the incident response have been?**
-        * **What `UnderReplicatedPartitions > 0` means:** At least one partition has fewer in-sync replicas than `replication.factor`. The cluster is operating with reduced durability.
-        * **First, understand how `min.insync.replicas` and ISR interact:**
-            * `min.insync.replicas=2` means: Kafka will **refuse** `acks=all` writes if ISR drops below 2
-            * So when ISR=1, `acks=all` producers immediately get `NotEnoughReplicasException` — writes are **rejected**, not silently accepted
-            * BUT producers using `acks=1` (only leader must acknowledge) are completely unaffected — they keep writing successfully to the leader alone, with zero replica backup
-        * **Risks during those 20 minutes:**
-            1. **`acks=all` producers:** Writes are rejected with `NotEnoughReplicasException`. No data loss, but your service is down/erroring until ISR recovers.
-            2. **`acks=1` producers:** Writes succeed and appear fine — but data only exists on 1 broker. If that broker crashes before the lagging replica catches up = **permanent data loss** for those messages.
-            3. **Leader crash = partition unavailable:** With ISR=1 (only the leader), if the leader dies, there is no eligible replica to take over. Partition stays unavailable until the lagging replica catches up — which could take minutes to hours depending on lag size.
-        * **The silent danger:** Teams assume `UnderReplicatedPartitions` is a replication lag issue (transient, self-healing). It is — until the leader crashes during that window. The risk is not the under-replication itself, it's what a crash during under-replication causes.
-        * **Correct incident response:**
-            1. Alert immediately when `UnderReplicatedPartitions > 0` for >2 minutes (not 20)
-            2. Identify which broker is lagging: `kafka-topics --describe` shows ISR per partition
-            3. Check that broker's logs for GC pauses, disk I/O, network issues
-            4. Do NOT restart the lagging broker immediately — let it catch up first, restart only if it's stuck
-            5. If broker is stuck and not catching up, controlled restart is safer than waiting indefinitely
-        * **Prevention:** Set `replica.lag.time.max.ms=60000` (generous), alert on `UnderReplicatedPartitions > 0` for **more than 2 minutes** (short blips are normal during broker restarts), and have a runbook that mandates immediate escalation — not "watch and wait".
-
-    * **What is a "transient blip" and when is it normal vs not?**
-        * A transient blip = `UnderReplicatedPartitions` spikes briefly (seconds) then self-heals. This is normal and expected in these situations:
-            * Broker restart (rolling deployment) — replica briefly falls out of ISR, catches up in seconds
-            * Temporary network hiccup — replica pauses replication briefly, rejoins ISR automatically
-            * Leader election — new leader elected, followers briefly lag, catch up fast
-        * **How Kafka self-heals:** The lagging replica keeps fetching from the leader. Once it has caught up to within `replica.lag.time.max.ms` (default 30s), Kafka automatically adds it back to ISR. No manual action needed.
-        * **When it is NOT a transient blip (treat as incident):**
-            * `UnderReplicatedPartitions > 0` for more than 2-3 minutes continuously → replica is stuck, not catching up
-            * Common causes: broker disk full, broker GC paused too long, network partition between brokers, broker process hung
-        * **Simple rule:** If it recovers in <2 minutes = transient, monitor. If it stays > 2 minutes = something is genuinely wrong on that broker, investigate immediately.
-
+    
 ### Integration
 
 * [x] **How did you integrate Kafka with Spring Boot?**
@@ -851,24 +596,262 @@ In **Apache Kafka**, **Kafka Streams** and **Kafka Connect** serve different pur
 
   ```
 
-    * **Production War Story — Follow-up (Expert): Messages in your DLQ have been accumulating for 3 days. The team wants to replay them back to the main topic after fixing the bug. What are the risks and what is the safe replay procedure?**
-        * **Risks of naive DLQ replay:**
-            1. **Ordering violation:** DLQ messages are out of order relative to the messages processed after them. Replaying them to the main topic injects old events *after* newer ones have already been processed. For state-changing events (inventory update, balance change), this corrupts state.
-            2. **Thundering herd:** Replaying 3 days of DLQ messages into the main topic alongside live traffic spikes consumer load. The system that just recovered may get overwhelmed again.
-            3. **Duplicate processing:** If the original message was partially processed before failing (e.g., payment initiated but not confirmed), replaying it may double-charge a customer.
-        * **Safe replay procedure:**
-        ```bash
-        # Step 1: Verify the fix is deployed and tested
-        # Step 2: Analyze DLQ messages — are they all the same failure type?
-        kafka-console-consumer.sh --topic orders.DLQ --from-beginning --max-messages 100
+----
 
-        # Step 3: Replay during low-traffic window (not peak hours)
-        # Step 4: Use a separate consumer group for replay — don't touch the main group’s offsets
-        kafka-consumer-groups.sh --bootstrap-server broker:9092           --group dlq-replay-$(date +%Y%m%d) --reset-offsets           --topic orders.DLQ --to-earliest --execute
+# TOO MUCH DETAILS
 
-        # Step 5: Replay with rate limiting (don’t flood main topic)
-        # Use a dedicated replay service with throttling: Thread.sleep between produces
+
+
+* [x] **How to handle message retries?**
+    * message retries are handled at producer side and consumer side, depending on the failure type.
+    * **Producer-side retries**
+        * Enabled via `retries` and `retry.backoff.ms`.
+        * Used for transient broker/network failures.
+        * Idempotent producer prevents duplicates during retries.
+    * **Consumer-side retries**
+        * On processing failure, consumer can:
+            * Retry in-memory (limited attempts).
+            * Commit offset after success only (manual commit).
+            * Send message to a retry topic with delay.
+    * **Dead Letter Queue (DLQ)**
+        * Messages that fail after max retries are sent to a DLQ for analysis.
+        * Prevents blocking the main consumer.
+
+    * **Production War Story — Follow-up (Expert): Your consumer retry logic used `Thread.sleep()` for backoff between retries inside the `@KafkaListener` method. Under failure conditions, this caused cascading rebalances. Explain the mechanism and the correct retry architecture.**
+        * **What happened:** While `Thread.sleep(30_000)` was sleeping (30s backoff), the consumer’s `poll()` was not being called. Kafka’s `max.poll.interval.ms=30000` expired. Kafka declared the consumer dead and triggered a rebalance. The partition was reassigned to another consumer, which also failed and slept, triggering another rebalance. A 3-consumer group was rebalancing every 30 seconds — no messages processed, coordinator CPU spiked.
+        * **The correct retry architecture — retry topics:**
         ```
-        * **Idempotency is the safety net:** If your consumer is idempotent (checks a dedup key before processing), replay is safe even with duplicates. Design for replay from day one.
-        * **Replay to a separate topic first:** Don’t replay directly to `orders` (main). Replay to `orders.replay`, have a shadow consumer verify processing results, then move to main only if results are correct.
-        * **Operational lesson:** DLQ messages must have rich headers: original topic, original partition, original offset, failure timestamp, exception type, stack trace. Without this, debugging and safe replay is nearly impossible.
+        orders (main)
+          → on failure → orders.retry.1 (delay: 1s)
+          → on failure → orders.retry.2 (delay: 30s)
+          → on failure → orders.retry.3 (delay: 5min)
+          → on failure → orders.DLQ
+        ```
+        * Spring Kafka’s `RetryTopicConfiguration` implements this pattern automatically:
+        ```java
+        @Bean
+        public RetryTopicConfiguration retryTopicConfig(KafkaTemplate<String, String> template) {
+            return RetryTopicConfigurationBuilder
+                .newInstance()
+                .exponentialBackoff(1000, 2, 300000) // 1s, 2s, 4s... max 5min
+                .maxAttempts(4)
+                .retryTopicSuffix(".retry")
+                .dltSuffix(".DLQ")
+                .create(template);
+        }
+        ```
+        * **Why retry topics work:** The failing message is immediately published to `orders.retry.1` and the original offset is committed. The main consumer continues processing other messages — no blocking, no sleep, no rebalance.
+        * **DLQ monitoring is non-negotiable:** Every message landing in DLQ must trigger an alert. DLQ messages represent data silently dropped from your processing pipeline. At a payments company, an unmonitored DLQ = missing transactions.
+
+
+
+* [x] **How to handle rebalancing in consumer groups?**
+    * Rebalancing is handled by cooperative assignors, timely offset commits, and rebalance listeners to minimize disruption and reprocessing.
+
+![Image](https://camo.githubusercontent.com/2aaf02be2cd8d5f88aba6d9a61a501c5cbc81e9d79ce61ecab9afbb8666d6656/68747470733a2f2f696d6167652e6175746f6d712e636f6d2f77696b692f626c6f672f6b61666b612d726562616c616e63696e672d636f6e63657074732d626573742d7072616374696365732f312e706e67)
+
+![Image](https://cdn.confluent.io/wp-content/uploads/eager-rebalancing-protocol.jpg)
+
+![Image](https://tomlee.co/img/KafkaRebalance.png)
+
+In **Apache Kafka**, rebalancing occurs when consumers join/leave or partitions change.
+
+
+
+* **Use cooperative rebalancing** (`partition.assignment.strategy=cooperative-sticky`)
+  → Minimizes stop-the-world rebalances.
+* **Commit offsets before rebalance**
+  → Prevents message reprocessing.
+* **Implement `ConsumerRebalanceListener`**
+  → Gracefully stop processing and save state.
+* **Tune timeouts** (`session.timeout.ms`, `max.poll.interval.ms`)
+  → Avoid unnecessary rebalances.
+    * New consumer joins → only a few partitions move instead of all.
+
+    * **Production War Story — Follow-up (Expert): During peak traffic, a consumer group was experiencing a rebalance storm — rebalancing every 2-3 minutes continuously. No consumers were added or removed. What caused it and how did you stop it?**
+        * **Root cause — `max.poll.interval.ms` violation from slow processing:** The consumer was using `max.poll.records=500` and processing each record required a DB lookup averaging 8ms. 500 × 8ms = 4 seconds, but occasionally a slow DB query took 200ms, pushing total batch time to `500 × 200ms = 100 seconds`. `max.poll.interval.ms=30000` (30s default) expired — Kafka declared the consumer dead and rebalanced.
+        * **The vicious cycle:** On rebalance, other consumers got the reassigned partitions and also hit slow DB queries (the DB was under load) — triggering *their* max.poll.interval violations — causing cascading rebalances across the entire group.
+        * **Diagnosis:**
+        ```bash
+        # Look for frequent rebalance events in consumer logs
+        grep "Rebalancing" consumer.log | awk '{print $1,$2}' | uniq -c
+
+        # Check commit rate — if commits happen then stop for 30s, consumer is stuck
+        kafka-consumer-groups.sh --describe --group my-group
+        # Watch the LAG column: if it grows then suddenly drops by exact batch size, rebalance is happening
+        ```
+        * **Fixes applied:**
+        ```properties
+        # Reduce batch size to keep processing under max.poll.interval.ms
+        max.poll.records=50          # from 500 to 50 — 50 * 200ms = 10s, safely under 30s
+
+        # Or increase the interval to match realistic worst-case processing time
+        max.poll.interval.ms=300000  # 5 minutes for heavy processing
+
+        # Switch to cooperative-sticky to minimize partition movement on legitimate rebalances
+        partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+        ```
+        * **Cooperative-sticky assignor is critical at scale:** Eager rebalancing (default) stops ALL consumers in the group (stop-the-world) during rebalance. With 20 consumers and 200 partitions, eager rebalance = 20 consumers idle simultaneously. Cooperative rebalancing only revokes and reassigns the partitions that actually need to move — other consumers keep processing.
+        * **Heartbeat vs poll timeout — common confusion:**
+            * `heartbeat.interval.ms` / `session.timeout.ms` — for detecting consumer *crashes* (no heartbeat from background thread)
+            * `max.poll.interval.ms` — for detecting consumer *slowness* (foreground processing too slow between polls)
+            * These are independent. A consumer can send heartbeats normally while its processing loop is too slow — `max.poll.interval.ms` triggers even if heartbeats are healthy.
+
+---
+* [x] **How to add/remove brokers from a cluster?**
+  ![Image](https://www.michael-noll.com/assets/uploads/kafka-cluster-overview.png)
+
+![Image](https://cdn.prod.website-files.com/68ed36e99e31581dedf5dcb1/690211c9f9eb9f1dc940f5e6_66a3d48228e3e933f5ee5e50_66880f0749f675709dbf3c22_guide-kafka-partition-img4.png)
+
+![Image](https://cdn.prod.website-files.com/6541750d4db1a741ed66738c/65df6ad7407e03459c1f6ec9_Apache_Kafka_data_Decommissioning%20Brokers.webp)
+
+In **Apache Kafka**, brokers can be added or removed **without downtime** using partition reassignment.
+
+* New Broker
+1. Start a **new broker** with a unique `broker.id`.
+2. Broker registers with the cluster.
+3. **Reassign partitions** to the new broker (manual or automated).
+4. Data is **rebalanced automatically**.
+
+
+* Removing a broker
+    1. **Trigger partition reassignment** to move data off the broker.
+    2. Wait until partitions are fully replicated elsewhere.
+    3. **Shutdown the broker safely**.
+
+* Tools
+    * Kafka reassignment tools / admin APIs
+    * Automated rebalancing in managed Kafka
+
+
+
+* **Production War Story — Follow-up (Expert): Messages in your DLQ have been accumulating for 3 days. The team wants to replay them back to the main topic after fixing the bug. What are the risks and what is the safe replay procedure?**
+    * **Risks of naive DLQ replay:**
+        1. **Ordering violation:** DLQ messages are out of order relative to the messages processed after them. Replaying them to the main topic injects old events *after* newer ones have already been processed. For state-changing events (inventory update, balance change), this corrupts state.
+        2. **Thundering herd:** Replaying 3 days of DLQ messages into the main topic alongside live traffic spikes consumer load. The system that just recovered may get overwhelmed again.
+        3. **Duplicate processing:** If the original message was partially processed before failing (e.g., payment initiated but not confirmed), replaying it may double-charge a customer.
+    * **Safe replay procedure:**
+    ```bash
+    # Step 1: Verify the fix is deployed and tested
+    # Step 2: Analyze DLQ messages — are they all the same failure type?
+    kafka-console-consumer.sh --topic orders.DLQ --from-beginning --max-messages 100
+
+    # Step 3: Replay during low-traffic window (not peak hours)
+    # Step 4: Use a separate consumer group for replay — don't touch the main group’s offsets
+    kafka-consumer-groups.sh --bootstrap-server broker:9092           --group dlq-replay-$(date +%Y%m%d) --reset-offsets           --topic orders.DLQ --to-earliest --execute
+
+    # Step 5: Replay with rate limiting (don’t flood main topic)
+    # Use a dedicated replay service with throttling: Thread.sleep between produces
+    ```
+    * **Idempotency is the safety net:** If your consumer is idempotent (checks a dedup key before processing), replay is safe even with duplicates. Design for replay from day one.
+    * **Replay to a separate topic first:** Don’t replay directly to `orders` (main). Replay to `orders.replay`, have a shadow consumer verify processing results, then move to main only if results are correct.
+    * **Operational lesson:** DLQ messages must have rich headers: original topic, original partition, original offset, failure timestamp, exception type, stack trace. Without this, debugging and safe replay is nearly impossible.
+
+
+* **Production War Story — Follow-up (Expert): With `acks=all`, your producer latency spiked from 5ms to 800ms during a rolling broker restart. What was happening and how did you fix it without sacrificing durability?**
+    * **Root cause — ISR shrink during restart:** During a rolling restart, the restarting broker leaves ISR. If `min.insync.replicas=2` and RF=3, when 1 broker restarts, only 2 are in ISR — still fine. But if `replica.lag.time.max.ms` is too tight and the restarting broker is slow to rejoin ISR, you can temporarily have ISR=1 (just the leader). With `acks=all` + `min.insync.replicas=2`, the producer blocks waiting for a 2nd replica that isn’t available — requests pile up until timeout.
+    * **What actually caused 800ms latency:** `replica.lag.time.max.ms=10000` (default), but our restarting broker took 12s to fully replay its log and rejoin ISR. During those 12 seconds, every producer send with `acks=all` either blocked or threw `NotEnoughReplicasException`.
+    * **Fixes:**
+        ```properties
+        # Give replicas more time to rejoin ISR before being considered lagging
+        replica.lag.time.max.ms=30000
+
+        # Producer: don't wait forever, fail fast and let retry logic handle it
+        delivery.timeout.ms=30000
+        request.timeout.ms=5000
+        retries=2147483647
+        retry.backoff.ms=100
+        ```
+    * **Operational fix:** During planned rolling restarts, temporarily set `min.insync.replicas=1` via dynamic config for non-critical topics, then restore after restart completes. For payment topics — never reduce below 2.
+    * **Better long-term fix:** Pre-warm brokers before rejoining the cluster. Increase log segment size to reduce replay time. Use `unclean.leader.election.enable=false` always.
+
+---
+* [x] **Explain idempotent producer**
+    * Idempotent producer prevents duplicate messages during retries by using producer IDs and sequence numbers.
+
+    * **Production War Story — Follow-up (Expert): You enabled `enable.idempotence=true` but still saw duplicate records in your consumer. How is that possible and where was the bug?**
+        * **Idempotent producer covers producer→broker duplication only.** It assigns each producer a `PID` (Producer ID) and a monotonically increasing sequence number per partition. If the broker receives the same (PID, partition, sequence) twice due to a retry, it deduplicates at the broker level.
+        * **Where it does NOT help:**
+            1. **Consumer-side reprocessing:** If the consumer crashes after processing but before committing the offset, it re-reads and reprocesses the same message. Idempotent producer has nothing to do with this — the consumer must be idempotent itself.
+            2. **Producer restart:** On JVM restart, the producer gets a **new PID**. The broker can no longer deduplicate against the old PID. Messages sent just before the crash that the broker already committed will be re-sent with a new PID and accepted as new records.
+            3. **Multiple producer instances:** Two pods with the same `transactional.id` will compete, but two pods without it produce independently — both can produce the same logical event if they both process the same upstream event (e.g., both read from the same DB row and produce without coordination).
+        * **The real fix for end-to-end exactly-once:** Combine `enable.idempotence=true` + `transactional.id` (for atomic produce+offset commit in Kafka Streams / read-process-write flows) + **consumer-side idempotency** using a deduplication key stored in Redis or DB with a TTL equal to your max expected redelivery window.
+        * **Production pattern for payment events:**
+        ```java
+        // Consumer side: check + process atomically
+        String dedupKey = "payment:" + record.key() + ":" + record.offset();
+        if (redis.setIfAbsent(dedupKey, "1", Duration.ofHours(24))) {
+            paymentService.process(record.value()); // only processes once
+        }
+        // else: silently skip duplicate
+        ```
+Here's the modified section with your follow-up question added inline:
+
+
+---
+* [x] **What is producer batching and compression?**
+    * Batching reduces network calls by sending messages in bulk, and compression reduces payload size to improve Kafka throughput.
+    * Controlled by `batch.size` and `linger.ms`
+    * Messages for the same partition are batched together
+    * Producer compresses message batches before sending : gzip, snappy, lz4, zstd
+
+    * **Production War Story — Follow-up (Expert): You increased `linger.ms` from 0 to 20ms to improve batching, but your p99 producer latency went from 8ms to 180ms under certain traffic patterns. What happened?**
+        * **Root cause — batch accumulation under bursty traffic:** `linger.ms=20` means the producer waits up to 20ms to fill a batch before sending. Under bursty traffic, when messages arrive in bursts followed by quiet periods, every batch accumulates for the full 20ms even when it could have been sent earlier with just 3-4 messages.
+        * **Compound issue — `buffer.memory` exhaustion:** When downstream brokers were slow (GC pause), send buffers filled up. With `linger.ms=20`, batches accumulate longer, filling `buffer.memory` faster. Once full, the producer blocks for `max.block.ms` (default 60s) before throwing `TimeoutException`.
+        * **The right tuning approach:**
+   ```properties
+        # Start conservative
+        linger.ms=5                  # not 0 (wastes batching), not too high
+        batch.size=65536             # 64KB per batch — tune based on message size
+        compression.type=lz4         # fastest compression, ~2x ratio
+        buffer.memory=67108864       # 64MB — increase for high-throughput producers
+        max.block.ms=5000            # fail fast instead of blocking 60s
+   ```
+    * **Rule of thumb:** `linger.ms` should be <= your acceptable p99 latency budget minus broker processing time. For payment APIs: `linger.ms=0` (latency matters more than throughput). For event pipelines: `linger.ms=5-20` is fine.
+    * **Compression choice by use case:**
+        * `lz4` — best for high-throughput, CPU-sensitive producers (lowest CPU overhead)
+        * `zstd` — best compression ratio for archival topics (reduces storage costs)
+        * `snappy` — good middle ground, widely supported
+        * `gzip` — avoid for real-time; highest CPU, slowest compression
+
+    * **Follow-up: If `batch.size` and `linger.ms` are already configured, why does the producer still block for 60s?**
+        * **`batch.size`/`linger.ms` and `buffer.memory` solve different problems:**
+            * `batch.size` + `linger.ms` = controls *when* a batch is ready to send
+            * `buffer.memory` = the actual RAM pool where ALL pending batches sit waiting for the network thread to flush them to the broker
+        * **The block happens at memory allocation, not at batching.** When your app calls `producer.send()`, Kafka first tries to allocate space in `buffer.memory` for the new message. If `buffer.memory` is full (broker is slow, network thread is backed up), this allocation **blocks** — your app thread freezes here, before any batching even happens.
+        * **Why 60s?** `max.block.ms` defaults to 60,000ms. Kafka assumes the broker might recover soon and waits. Meanwhile your app thread is frozen.
+        * **The chain:** Broker slow → network thread can't drain buffer → `buffer.memory` fills up → `producer.send()` blocks on next message → your app hangs for up to 60s → `TimeoutException`
+        * **Fix:** `max.block.ms=5000` (fail fast in 5s) + increase `buffer.memory` so it takes longer to fill up
+
+---
+
+
+* **Production War Story — Follow-up (Expert): Your monitoring showed `UnderReplicatedPartitions > 0` for 20 minutes. The team ignored it thinking it was a transient blip. What were the actual downstream risks during those 20 minutes and what should the incident response have been?**
+  * **What `UnderReplicatedPartitions > 0` means:** At least one partition has fewer in-sync replicas than `replication.factor`. The cluster is operating with reduced durability.
+  * **First, understand how `min.insync.replicas` and ISR interact:**
+  * `min.insync.replicas=2` means: Kafka will **refuse** `acks=all` writes if ISR drops below 2
+  * So when ISR=1, `acks=all` producers immediately get `NotEnoughReplicasException` — writes are **rejected**, not silently accepted
+  * BUT producers using `acks=1` (only leader must acknowledge) are completely unaffected — they keep writing successfully to the leader alone, with zero replica backup
+  * **Risks during those 20 minutes:**
+  1. **`acks=all` producers:** Writes are rejected with `NotEnoughReplicasException`. No data loss, but your service is down/erroring until ISR recovers.
+  2. **`acks=1` producers:** Writes succeed and appear fine — but data only exists on 1 broker. If that broker crashes before the lagging replica catches up = **permanent data loss** for those messages.
+  3. **Leader crash = partition unavailable:** With ISR=1 (only the leader), if the leader dies, there is no eligible replica to take over. Partition stays unavailable until the lagging replica catches up — which could take minutes to hours depending on lag size.
+  * **The silent danger:** Teams assume `UnderReplicatedPartitions` is a replication lag issue (transient, self-healing). It is — until the leader crashes during that window. The risk is not the under-replication itself, it's what a crash during under-replication causes.
+  * **Correct incident response:**
+  1. Alert immediately when `UnderReplicatedPartitions > 0` for >2 minutes (not 20)
+  2. Identify which broker is lagging: `kafka-topics --describe` shows ISR per partition
+  3. Check that broker's logs for GC pauses, disk I/O, network issues
+  4. Do NOT restart the lagging broker immediately — let it catch up first, restart only if it's stuck
+  5. If broker is stuck and not catching up, controlled restart is safer than waiting indefinitely
+  * **Prevention:** Set `replica.lag.time.max.ms=60000` (generous), alert on `UnderReplicatedPartitions > 0` for **more than 2 minutes** (short blips are normal during broker restarts), and have a runbook that mandates immediate escalation — not "watch and wait".
+
+    * **What is a "transient blip" and when is it normal vs not?**
+        * A transient blip = `UnderReplicatedPartitions` spikes briefly (seconds) then self-heals. This is normal and expected in these situations:
+            * Broker restart (rolling deployment) — replica briefly falls out of ISR, catches up in seconds
+            * Temporary network hiccup — replica pauses replication briefly, rejoins ISR automatically
+            * Leader election — new leader elected, followers briefly lag, catch up fast
+        * **How Kafka self-heals:** The lagging replica keeps fetching from the leader. Once it has caught up to within `replica.lag.time.max.ms` (default 30s), Kafka automatically adds it back to ISR. No manual action needed.
+        * **When it is NOT a transient blip (treat as incident):**
+            * `UnderReplicatedPartitions > 0` for more than 2-3 minutes continuously → replica is stuck, not catching up
+            * Common causes: broker disk full, broker GC paused too long, network partition between brokers, broker process hung
+        * **Simple rule:** If it recovers in <2 minutes = transient, monitor. If it stays > 2 minutes = something is genuinely wrong on that broker, investigate immediately.

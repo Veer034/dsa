@@ -167,54 +167,6 @@
 
 ### Collections Framework
 
-* [x] **Internal working of HashMap - how does it handle collisions?**
-
-  A HashMap is an array of buckets (default 16). The bucket index for a key is computed as:
-
-    ```java
-    index = (n - 1) & hash(key)   // n = array length
-    ```
-
-  `hash()` takes the key's `hashCode()` and applies a secondary mix (XORs high bits into low bits) to reduce clustering from poor `hashCode()` implementations.
-    
-  ---
-
-  **Collision handling — chaining**
-
-  When two keys land in the same bucket, they're stored as a linked list at that index. On `get()`, HashMap finds the bucket, then walks the list calling `equals()` to find the right key.
-
-    ```
-    bucket[3] → Entry("cat", 1) → Entry("dog", 2) → null
-    ```
-
-  **Java 8 optimisation — treeify:** when a single bucket's chain exceeds 8 entries, the linked list converts to a red-black tree. Lookup degrades from O(n) to O(log n) instead of O(n) in the worst case. It converts back to a list if entries drop below 6.
-    
-  ---
-
-  **Resize / rehash**
-
-  When entries exceed `capacity × loadFactor` (default 0.75), the array doubles in size and every entry is rehashed into the new array. This is expensive — O(n) — which is why you should pass an initial capacity if you know the size upfront.
-
-    ```java
-    new HashMap<>(64);   // avoids rehashing if you're storing ~48 entries
-    ```
-    
-  ---
-
-  **End to end on `put("cat", 1)`:**
-
-    ```
-    1. hash("cat")          → compute bucket index
-    2. bucket empty?        → insert directly
-       bucket occupied?     → walk the chain, check equals()
-          key exists?       → overwrite value
-          key not found?    → append new Entry to chain
-    3. size > threshold?    → resize + rehash
-    ```
-
-
-**The practical gotcha:** if your `hashCode()` always returns the same value, every key lands in the same bucket. The map degrades to a linked list — O(n) for everything. Java 8's treeification softens this to O(log n) but it's still a serious performance problem. Good `hashCode()` distribution matters.
-
 ---
 * [x] **Difference between HashMap, ConcurrentHashMap, and Hashtable**
     1. **HashMap**: Not thread-safe, fastest, allows **one null key and multiple null values**.
@@ -381,21 +333,6 @@ Use Comparable for natural order, Comparator for flexibility.
     * >ArrayDeque disallows null because methods like poll() use null as a special return value to indicate that the deque is empty.
     * **As a Stack:** Use `ArrayDeque.push()`/`pop()`. Never use the `Stack` class — it extends `Vector` and synchronizes every method (legacy, poor performance).
     * **As a Queue:** Use `ArrayDeque.offer()`/`poll()`. For bounded, thread-safe, blocking queues in producer-consumer systems use `ArrayBlockingQueue`.
-
----
-* [ ] **Explain `WeakReference`, `SoftReference`, `PhantomReference`, and `WeakHashMap`. When do they matter in production?**
-
-  | Reference Type | GC collects when | Primary use |
-      |---------------|-----------------|-------------|
-  | Strong (default) | Object is unreachable | Normal usage |
-  | `SoftReference<T>` | JVM is memory-pressured (before OOM) | In-process memory-sensitive caches |
-  | `WeakReference<T>` | Next GC cycle regardless of memory | Canonical maps, metadata caches |
-  | `PhantomReference<T>` | After finalization, before memory reclaim | Off-heap resource cleanup |
-
-    * **`WeakHashMap`:** Keys are weakly referenced. When a key has no strong references elsewhere, the GC can collect it — the map entry is **automatically removed**. Use for metadata/attribute maps keyed on objects you don't own. The map self-cleans as objects are collected.
-    * **`SoftReference` cache:** JVM guarantees soft references are cleared before throwing `OutOfMemoryError`. The cache automatically releases memory under pressure — objects stay cached as long as there's memory to spare. Guava's `CacheBuilder.softValues()` uses this.
-    * **`PhantomReference` + `Cleaner`:** Safer alternative to `finalize()` for cleaning up off-heap resources (native memory, file handles). The `Cleaner` API (Java 9+) registers a cleanup action that runs after the object is phantom-reachable.
-    * **Why `WeakHashMap` is not a general cache:** Entries can be evicted by GC at any time, even under no memory pressure, if the key has no other strong references. If correctness depends on the entry being present, use a proper cache (`Caffeine`, `Guava Cache`).
 
 ---
 * [ ] **What is `CopyOnWriteArrayList`? When should you use it and when must you avoid it?**
@@ -995,297 +932,6 @@ semaphore.release();   // return permit
     * **Practical rule:** If two threads share a variable and there's no synchronization, lock, or volatile between them — you have **no JMM guarantee**. The reader may see any value.
 
 ---
-* [ ] **What is Double-Checked Locking (DCL)? Why was it broken without `volatile`, and how does it work correctly?**
-
-  * Double-checked locking is a pattern used for **lazy initialization of a singleton** while minimizing synchronization overhead. The singleton instance is checked once before acquiring the lock and again inside the synchronized block.
-
-    ```java
-    // ❌ Broken without volatile
-    private static Singleton instance;
-
-    public static Singleton getInstance() {
-        if (instance == null) {              // First check (without lock)
-            synchronized (Singleton.class) {
-                if (instance == null) {      // Second check (with lock)
-                    instance = new Singleton();
-                }
-            }
-        }
-        return instance;
-    }
-    ```
-
-  * **Why it was broken:**
-
-    Object creation is not an atomic operation. The JVM may perform:
-
-    1. Allocate memory for the object.
-    2. Assign the reference to `instance`.
-    3. Execute the constructor.
-
-    Steps **2 and 3 may be reordered** by the compiler/JIT/CPU.
-
-    As a result, another thread may observe a non-null `instance` reference before the constructor has completed, leading to access to a partially initialized object.
-
-  * **How `volatile` fixes it:**
-
-    `volatile` prevents the reordering of writes that would expose a partially constructed object. It also guarantees visibility of updates across threads.
-
-    A write to a volatile variable **happens-before** every subsequent read of that variable.
-
-    ```java
-    // ✅ Correct Double-Checked Locking (Java 5+)
-    private static volatile Singleton instance;
-
-    public static Singleton getInstance() {
-        if (instance == null) {
-            synchronized (Singleton.class) {
-                if (instance == null) {
-                    instance = new Singleton();
-                }
-            }
-        }
-        return instance;
-    }
-    ```
-
-  * **Java version note:**
-    Double-checked locking became reliable starting with **Java 5**, when the Java Memory Model was updated and `volatile` semantics were strengthened.
-
-  * **Better alternatives:**
-
-    **Initialization-on-Demand Holder Idiom**
-
-    ```java
-    public class Singleton {
-
-        private Singleton() {}
-
-        private static class Holder {
-            private static final Singleton INSTANCE = new Singleton();
-        }
-
-        public static Singleton getInstance() {
-            return Holder.INSTANCE;
-        }
-    }
-    ```
-
-      This approach is:
-      - Lazy initialized
-      - Thread-safe
-      - No explicit synchronization
-      - Relies on JVM class-loading guarantees
-
-      **Enum Singleton (recommended when possible)**
-
-    ```java
-    public enum Singleton {
-        INSTANCE;
-    }
-    ```
-
-      This is the simplest and safest singleton implementation in Java.
----
-
-### JVM & Memory Management
-
-* [x] **Explain JVM architecture (Class Loader, Runtime Data Areas, Execution Engine)**
-    * `.java` (source code) → `.class` (bytecode by `javac`) → ClassLoader (loads & verifies class) → Runtime Data
-      Areas (heap, stack, metaspace, PC) → Execution Engine (Interpreter runs first, JIT compiles hot code) → Native CPU (executes optimized machine instructions)
-
-
----
-* [x] **Explain Garbage Collection and types of GC (Serial, Parallel, CMS, G1, ZGC)**
-  **Garbage Collection (GC):**
-
-Automatic memory management - reclaims memory from unreachable objects.
-
-**GC Types:**
-
-**1. Serial GC** (`-XX:+UseSerialGC`):
-- Single thread for GC
-- Stops all application threads (Stop-The-World)
-- Best for: Small apps, single CPU, <100MB heap
-- Simple, low overhead
-
-**2. Parallel GC** (`-XX:+UseParallelGC`):
-- Multiple threads for GC
-- Focus on throughput
-- Best for: Multi-core systems, batch processing
-- Default in Java 8
-
-**3. CMS (Concurrent Mark Sweep)** (`-XX:+UseConcMarkSweepGC`):
-- Runs concurrently with application
-- Low pause times
-- Best for: Applications needing low latency
-- Deprecated in Java 9+, removed in Java 14
-
-**4. G1 GC (Garbage First)** (`-XX:+UseG1GC`):
-- Divides heap into regions
-- Predictable pause times
-- Best for: Large heaps (>4GB), balance throughput + latency
-- Default from Java 9+
-
-**5. ZGC** (`-XX:+UseZGC`):
-- Ultra-low pause times (<10ms)
-- Scales to multi-TB heaps
-- Best for: Large heaps, latency-sensitive apps
-- Production-ready from Java 15+
-
-**Quick Comparison:**
-
-| GC | Pause Time | Throughput | Heap Size | Use Case |
-|---|---|---|---|---|
-| Serial | High | Low | Small | Single CPU |
-| Parallel | High | High | Medium | Batch jobs |
-| CMS | Low | Medium | Medium | Low latency (deprecated) |
-| G1 | Medium | Good | Large | General purpose |
-| ZGC | Very Low | Good | Very Large | Ultra-low latency |
-
-Here's the updated doc with the PermGen → Metaspace section added:
-
-```markdown
-Java heap is divided into **Young Generation** and **Old Generation**. Garbage collection works differently in each.
-
----
-
-## 1. Eden Space (Object Creation)
-
-New objects are created in **Eden**.
-
-Example
-
-```java
-User u = new User();
-```
-
-Object first goes to **Eden memory**.
-
-When Eden becomes **full → Minor GC runs**.
-
----
-
-## 2. Minor GC (Young Generation Cleanup)
-
-Young generation has:
-
-* **Eden**
-* **Survivor S0**
-* **Survivor S1**
-
-Process:
-
-1. Objects created in **Eden**
-2. When Eden fills → **Minor GC runs**
-3. **Alive objects move to Survivor space (S0)**
-4. Dead objects are **removed**
-
-Next GC:
-
-5. Objects move between **S0 ↔ S1**
-6. Their **age increases**
-
-Example flow
-
-```
-Eden → S0 → S1 → S0 → ...
-```
-
----
-
-## 3. Promotion to Old Generation
-
-If an object **survives many Minor GCs**, it moves to **Old Generation (Tenured space)**.
-
-These are **long-living objects**.
-
-Example
-
-* cache objects
-* application singletons
-
----
-
-## 4. Major GC (Old Generation Cleanup)
-
-When **Old Generation becomes full**, **Major GC (Full GC)** runs.
-
-Process:
-
-1. GC scans old generation
-2. Removes unreachable objects
-3. May **compact memory**
-
-Major GC is **slower** than Minor GC.
-
----
-
-
-## Simple Flow
-
-```
-New Object
-   ↓
-Eden
-   ↓ (Minor GC)
-Survivor S0 / S1
-   ↓ (after multiple GC cycles)
-Old Generation
-   ↓ (Major GC)
-Cleanup
-
-Class Loading
-   ↓
-Method Area (Metaspace in Java 8+)
-   ↓ (ClassLoader unreachable)
-Immediate cleanup — no GC needed
-```
-
----
-
-## Quick Summary
-
-| Memory Area         | Purpose                                      |
-|---------------------|----------------------------------------------|
-| Eden                | New objects created                          |
-| Survivor (S0/S1)    | Short-lived surviving objects                |
-| Old Generation      | Long-lived objects                           |
-| Method Area/PermGen | Class metadata, static vars, constant pool (pre Java 8) |
-| Metaspace           | Same as Method Area, native memory (Java 8+) |
-| Minor GC            | Cleans Young Generation                      |
-| Major GC            | Cleans Old Generation + PermGen (pre Java 8) |
-
-
----
-* [x] **How would you identify and fix memory leaks?**
-    * In Kubernetes, memory leaks are identified via **Prometheus/Grafana JVM metrics** — if **heap usage after GC keeps increasing and pods get OOMKilled**, it indicates a leak. Root cause is found using **JFR or async-profiler**, not by running `jmap` on live pods (heap dumps cause Stop-the-World(STW) pauses that make the problem worse).
-    * **Step-by-step production diagnosis:**
-        1. **Confirm the leak:** Graph `jvm_memory_used_bytes{area="heap"}` after each GC. A leak shows a **sawtooth pattern with rising troughs** — heap never fully reclaims after GC.
-        2. **Capture a heap dump:** Enable `-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/` so the dump is automatic on OOM. Or trigger manually with `jcmd <pid> GC.heap_dump /tmp/dump.hprof` during elevated memory (not at OOM — process may die first).
-        3. **Analyze with Eclipse MAT or JDK Mission Control:** Look for the "Dominator Tree" — the objects retaining the most memory. Common suspects: `ThreadLocal` not cleaned up, static `List`/`Map` growing unbounded, event listeners not deregistered, Hibernate session caches held too long.
-        4. **Common root causes:**
-            * `ThreadLocal` values not `remove()`d in thread pools — values accumulate per thread forever.
-            * Static collections (caches, registries) without eviction.
-            * `ClassLoader` leaks in hot-reload scenarios (Tomcat redeploy) — class metadata stays in Metaspace.
-            * Closures capturing large objects inadvertently.
-        5. **Fix and validate:** After the fix, monitor the GC trough baseline for 24h+ under production load — it must stabilize, not grow.
-
----
-* [ ] **What are common causes of `OutOfMemoryError` and how do you distinguish between them?**
-    * `OutOfMemoryError` has several distinct subtypes — each points to a different root cause:
-
-  | OOM Message | Cause | Fix |
-      |-------------|-------|-----|
-  | `Java heap space` | Objects filling old gen, GC can't reclaim fast enough | Heap leak fix, increase `-Xmx`, reduce allocation rate |
-  | `GC overhead limit exceeded` | GC spending >98% of time but reclaiming <2% heap | Same as above — heap is exhausted |
-  | `Metaspace` | Too many classloaders / dynamic class generation | Increase `-XX:MaxMetaspaceSize`, fix classloader leaks |
-  | `unable to create new native thread` | OS thread limit hit (usually `ulimit -u`) | Reduce thread count, use virtual threads, increase OS limit |
-  | `Direct buffer memory` | Off-heap `ByteBuffer.allocateDirect()` exhausted | Increase `-XX:MaxDirectMemorySize`, ensure buffers are released |
-
-    * **Production tip:** `-XX:+ExitOnOutOfMemoryError` — kills the JVM immediately on OOM instead of running as a zombie process in an inconsistent state. On Kubernetes, the pod restarts cleanly. Always combine with `-XX:+HeapDumpOnOutOfMemoryError` for post-mortem analysis.
-
----
 * [x] **Explain JVM tuning parameters you've used in production**
     * In production (Java 17, Kubernetes), I tune JVM mainly for **GC latency and container awareness**: I set **heap sizing via `-Xms/-Xmx` aligned to pod limits**, use **G1GC (default) or ZGC for low latency**, tune **pause goals (`-XX:MaxGCPauseMillis`)**, control **Metaspace (`-XX:MaxMetaspaceSize`)**, enable **GC logs and JFR**, and rely on **Prometheus/Grafana metrics** to validate post-GC heap stability and pause times.”
 
@@ -1293,9 +939,6 @@ Immediate cleanup — no GC needed
 * [x] **What is the difference between stack and heap memory?**
     * **Stack** stores method calls and local variables and is **thread-local and fast**, while **Heap** stores objects and is **shared across threads and managed by the Garbage Collector**.
 
----
-* [x] **Explain PermGen vs Metaspace (Java 8+)**
-    * PermGen (pre-Java 8) stored class metadata in a fixed-size, separate GC-managed region, often causing OutOfMemoryError. Metaspace (Java 8+) stores the same metadata in native OS memory, grows dynamically, and is more stable in production.
 
 ### Exception Handling
 
@@ -1524,25 +1167,156 @@ Problem: Millions of existing classes already implemented these interfaces. Addi
     ```
     * **`partitioningBy(predicate)`** — special case of `groupingBy` that produces exactly two groups: `true` and `false`. More efficient than `groupingBy` with a boolean classifier.
 
+ 
+---
+
+
+### Performance Profiling & JVM Deep Dives
+
+* [x] **Walk me through diagnosing a latency spike in production**
+    1. **Correlate first**: Check GC logs / JFR — is the latency spike at the same time as a Full GC or long GC pause? If yes, the fix is GC tuning (heap size, GC algorithm, allocation rate).
+    2. **Thread state**: take a thread dump (`jstack` or `kill -3`) during the spike. Are threads `BLOCKED`? On what lock? This points to lock contention.
+    3. **CPU profile**: use async-profiler (`-e cpu`) attached to the running JVM. Flame graph shows where CPU time is actually spent — often reveals unexpected serialisation, regex, or reflection overhead.
+    4. **Allocation profile**: async-profiler `-e alloc`. High allocation rate → frequent GC → latency. Find what's allocating (often string concatenation in hot paths, or unnecessary object creation in mappers).
+    5. **I/O and external calls**: if the above are clear, the bottleneck is usually a downstream service. Check connection pool saturation (`HikariPool` metrics), slow queries (slow query log), or missing timeouts causing thread pile-up.
+    6. **JFR continuous recording**: in production, always have JFR running with low overhead settings. You can retrieve a recording after the fact and inspect it in JDK Mission Control.
+
+---
+* [x] **What JVM flags do you audit before a service goes to production?**
+
+```bash
+# Container-aware heap sizing (Java 11+)
+-XX:+UseContainerSupport
+-XX:MaxRAMPercentage=75.0          # leave headroom for off-heap, Metaspace, stack
+ 
+# GC — G1 for most services, ZGC for latency-sensitive
+-XX:+UseG1GC
+-XX:MaxGCPauseMillis=200
+ 
+# Prevent Metaspace growth surprises
+-XX:MaxMetaspaceSize=256m
+ 
+# Startup: skip class verification for known-good JARs
+-XX:TieredStopAtLevel=1            # use only for fast startup (Lambda) — disables JIT
+ 
+# Observability — always on in production
+-Xlog:gc*:file=/var/log/gc.log:time,uptime:filecount=5,filesize=20m
+-XX:StartFlightRecording=settings=default,filename=/tmp/recording.jfr,dumponexit=true
+ 
+# OOM diagnostics
+-XX:+HeapDumpOnOutOfMemoryError
+-XX:HeapDumpPath=/tmp/heapdump.hprof
+-XX:+ExitOnOutOfMemoryError        # fail fast — zombie processes are worse than restarts
+```
+
+**Flag you should remove from old configs:**
+- `-XX:+UseConcMarkSweepGC` — removed in Java 14
+- `-XX:PermSize` / `-XX:MaxPermSize` — PermGen is gone since Java 8
+
+---
+
+### Code Review & Technical Leadership
+
+* [x] **What do you look for in a PR beyond correctness?**
+    - **Readability first**: code is read far more than it is written. Variable names, method length, comment quality (why, not what).
+    - **Test quality**: are tests testing behaviour or implementation? Brittle tests (mocking private methods, testing internal state) are worse than no tests — they resist refactoring.
+    - **Error handling**: what happens on the unhappy path? Are exceptions handled at the right level, or swallowed silently?
+    - **Concurrency**: is shared mutable state properly guarded? Are thread-pool sizes hardcoded or configurable?
+    - **Observability**: does new code emit metrics, structured logs with trace IDs, and meaningful health indicators?
+    - **Security**: is user input validated? Are secrets hardcoded? Are SQL queries parameterised?
+    - **Backward compatibility**: for API changes, is the contract additive or breaking? Is there a migration path?
+
+
+### Object-Oriented Design (OOP Depth)
+
+
+---
+* [ ] **What is the difference between composition and inheritance? When do you use each?**
+    * **Inheritance (IS-A):** Use when the subclass truly IS a specialization of the base class and needs to be substitutable for it (Liskov). `Dog extends Animal`. Good for polymorphism through base type references.
+    * **Composition (HAS-A):** The class contains an instance of another class and delegates to it. `Car HAS-A Engine`. Preferred over inheritance in most cases because:
+        * No tight coupling to parent's implementation details — if the parent changes an internal method, the child may break silently.
+        * You can compose multiple behaviors; you can only extend one class.
+        * Easier to unit test — inject mock collaborators via constructor.
+    * **"Favor composition over inheritance"** (Effective Java Item 18): Use inheritance only when the IS-A relationship is genuine and you need polymorphism. Otherwise compose.
+    ```java
+    // ❌ Inheritance for code reuse — wrong reason
+    class InstrumentedHashSet<E> extends HashSet<E> {
+        // Overriding addAll() and counting elements breaks because HashSet.addAll() calls add() internally
+        // Your override gets called twice per element — classic inheritance pitfall
+    }
+
+    // ✅ Composition — delegate, don't extend
+    class InstrumentedSet<E> implements Set<E> {
+        private final Set<E> delegate;
+        private int addCount = 0;
+        InstrumentedSet(Set<E> s) { this.delegate = s; }
+        public boolean add(E e) { addCount++; return delegate.add(e); }
+        public boolean addAll(Collection<? extends E> c) { addCount += c.size(); return delegate.addAll(c); }
+        // delegate all other methods to this.delegate
+    }
+    ```
+
+---
+
+### Production Scenarios & System Design in Java
+
+
+---
+* [ ] **How would you implement a thread-safe, fixed-size, bounded LRU cache in Java without using any external library?**
+    * Combine `LinkedHashMap` (access-ordered) + `ReentrantReadWriteLock` for concurrency:
+    ```java
+    public class BoundedLRUCache<K, V> {
+        private final int capacity;
+        private final LinkedHashMap<K, V> map;
+        private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+
+        public BoundedLRUCache(int capacity) {
+            this.capacity = capacity;
+            this.map = new LinkedHashMap<>(capacity, 0.75f, true) { // accessOrder=true
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<K,V> eldest) {
+                    return size() > capacity;
+                }
+            };
+        }
+
+        public V get(K key) {
+            lock.readLock().lock();  // reads can be concurrent
+            try { return map.get(key); }
+            finally { lock.readLock().unlock(); }
+        }
+
+        public void put(K key, V value) {
+            lock.writeLock().lock(); // writes are exclusive
+            try { map.put(key, value); }
+            finally { lock.writeLock().unlock(); }
+        }
+    }
+    ```
+    * **Interview follow-up:** Why not `Collections.synchronizedMap()`? It uses a single lock for all operations — `get()` and `put()` cannot be concurrent. `ReadWriteLock` allows concurrent reads. For production use, `Caffeine` cache is far better — non-blocking, highly concurrent, configurable TTL and size, Micrometer metrics built in.
+
+# TOO MUCH DETAILS
+
+
 ---
 * [ ] **What are the key additions in Java 11, Java 17, and Java 21 that matter for backend development?**
-    * **Java 11 (LTS):** `String` utility methods (`isBlank()`, `strip()`, `lines()`, `repeat()`). `HttpClient` (non-blocking, HTTP/2). `var` in lambda parameters. `Files.readString()` / `writeString()`. Removal of EE modules from JDK (no more bundled JAXB, Corba).
-    * **Java 17 (LTS):**
-        * **Records** — immutable data carriers with auto-generated boilerplate. Use for DTOs, value objects, query results.
-        * **Sealed classes** — restrict class hierarchies for exhaustive pattern matching. Use for domain event types, result types, state machines.
-        * **Pattern matching for `instanceof`** — eliminates the manual cast: `if (obj instanceof String s) { s.toUpperCase(); }`.
-        * **Switch expressions** — arrow syntax, exhaustiveness checking, returns a value. Replaces verbose `if-else` chains.
-        * **Text blocks** — multi-line strings for SQL, JSON, HTML without escaping. Cleaner test fixtures.
-        * **Strong encapsulation of JDK internals** — `--illegal-access` removed. Libraries that used reflection on private JDK fields now break.
-    * **Java 21 (LTS):**
-        * **Virtual threads (stable)** — JVM-managed, heap-allocated threads. Create millions without OS thread limits. Blocking I/O no longer blocks carrier threads. Write synchronous code, get async throughput.
-        * **Sequenced collections** — `SequencedCollection`, `SequencedMap` interfaces with `getFirst()`, `getLast()`, `reversed()` across all ordered collections.
-        * **Pattern matching for switch (stable)** — fully exhaustive switch over sealed types, including null handling.
-        * **Record patterns** — destructure records directly in pattern matching: `case Order(var id, var amount) when amount > 1000`.
-        * **Structured concurrency (preview)** — parent-child task lifecycle management; subtask failure auto-cancels siblings.
+  * **Java 11 (LTS):** `String` utility methods (`isBlank()`, `strip()`, `lines()`, `repeat()`). `HttpClient` (non-blocking, HTTP/2). `var` in lambda parameters. `Files.readString()` / `writeString()`. Removal of EE modules from JDK (no more bundled JAXB, Corba).
+  * **Java 17 (LTS):**
+    * **Records** — immutable data carriers with auto-generated boilerplate. Use for DTOs, value objects, query results.
+    * **Sealed classes** — restrict class hierarchies for exhaustive pattern matching. Use for domain event types, result types, state machines.
+    * **Pattern matching for `instanceof`** — eliminates the manual cast: `if (obj instanceof String s) { s.toUpperCase(); }`.
+    * **Switch expressions** — arrow syntax, exhaustiveness checking, returns a value. Replaces verbose `if-else` chains.
+    * **Text blocks** — multi-line strings for SQL, JSON, HTML without escaping. Cleaner test fixtures.
+    * **Strong encapsulation of JDK internals** — `--illegal-access` removed. Libraries that used reflection on private JDK fields now break.
+  * **Java 21 (LTS):**
+    * **Virtual threads (stable)** — JVM-managed, heap-allocated threads. Create millions without OS thread limits. Blocking I/O no longer blocks carrier threads. Write synchronous code, get async throughput.
+    * **Sequenced collections** — `SequencedCollection`, `SequencedMap` interfaces with `getFirst()`, `getLast()`, `reversed()` across all ordered collections.
+    * **Pattern matching for switch (stable)** — fully exhaustive switch over sealed types, including null handling.
+    * **Record patterns** — destructure records directly in pattern matching: `case Order(var id, var amount) when amount > 1000`.
+    * **Structured concurrency (preview)** — parent-child task lifecycle management; subtask failure auto-cancels siblings.
 
 * [x] **What's new in Java 17 that you've used?**
-    * In Java 17, I actively use Records for DTOs, sealed classes for domain modeling, pattern matching and switch expressions for cleaner logic, text blocks for SQL/JSON, and benefit from GC and JVM encapsulation improvements.
+  * In Java 17, I actively use Records for DTOs, sealed classes for domain modeling, pattern matching and switch expressions for cleaner logic, text blocks for SQL/JSON, and benefit from GC and JVM encapsulation improvements.
 
 ---
 
@@ -1719,10 +1493,10 @@ Use `handle` when you need to inspect both the result and the exception in one p
 
 ---
 * [x] **StampedLock vs ReentrantReadWriteLock — when and why?**
-    - **ReentrantReadWriteLock**: Multiple concurrent readers, one exclusive writer. Good when reads heavily outnumber writes. Writers can starve under high read load.
-    - **StampedLock** (Java 8+): Adds **optimistic reads** — read without acquiring a lock, then validate the stamp. If the stamp is invalid (a write happened), fall back to a full read lock. Much higher throughput for read-dominant workloads.
-    - **StampedLock is not reentrant** — a thread cannot acquire it again while holding it. This is the #1 footgun. Never use it in recursive call chains.
-    - **Use StampedLock** when: read-heavy, lock held briefly, no recursion.
+  - **ReentrantReadWriteLock**: Multiple concurrent readers, one exclusive writer. Good when reads heavily outnumber writes. Writers can starve under high read load.
+  - **StampedLock** (Java 8+): Adds **optimistic reads** — read without acquiring a lock, then validate the stamp. If the stamp is invalid (a write happened), fall back to a full read lock. Much higher throughput for read-dominant workloads.
+  - **StampedLock is not reentrant** — a thread cannot acquire it again while holding it. This is the #1 footgun. Never use it in recursive call chains.
+  - **Use StampedLock** when: read-heavy, lock held briefly, no recursion.
 
 ```java
 StampedLock lock = new StampedLock();
@@ -1739,30 +1513,30 @@ if (!lock.validate(stamp)) {             // check if a write raced us
  
 ---
 * [x] **What is the actor model and when would you use it over threads?**
-    - Actors are lightweight concurrent entities that communicate only via **message passing** — no shared mutable state, so no locks.
-    - Each actor processes one message at a time from its mailbox, maintaining its own private state.
-    - **Use when**: you have many long-lived, stateful concurrent entities (e.g., per-user session state, game entities, IoT device state machines) where shared-memory locking becomes unmanageable.
-    - **Java options**: Akka (full actor framework), or Java 21 virtual threads + channels as a lighter alternative.
-    - **Don't reach for actors** when standard `ExecutorService` + `CompletableFuture` is sufficient. Actors add significant conceptual overhead.
+  - Actors are lightweight concurrent entities that communicate only via **message passing** — no shared mutable state, so no locks.
+  - Each actor processes one message at a time from its mailbox, maintaining its own private state.
+  - **Use when**: you have many long-lived, stateful concurrent entities (e.g., per-user session state, game entities, IoT device state machines) where shared-memory locking becomes unmanageable.
+  - **Java options**: Akka (full actor framework), or Java 21 virtual threads + channels as a lighter alternative.
+  - **Don't reach for actors** when standard `ExecutorService` + `CompletableFuture` is sufficient. Actors add significant conceptual overhead.
 
 ---
 * [x] **Explain virtual threads (Project Loom) and structured concurrency (Java 21)**
 
   **Virtual threads:**
-    - Lightweight threads managed by the JVM, not the OS. You can create **millions** of them without exhausting OS thread limits.
-    - Blocking a virtual thread (e.g., waiting on I/O) does not block the underlying OS carrier thread — the JVM parks the virtual thread and reuses the carrier.
-    - **Key consequence**: You no longer need reactive/async programming purely to avoid blocking. Write synchronous code; get the concurrency benefits of async.
-    - `Thread.ofVirtual().start(task)` or `Executors.newVirtualThreadPerTaskExecutor()`
+  - Lightweight threads managed by the JVM, not the OS. You can create **millions** of them without exhausting OS thread limits.
+  - Blocking a virtual thread (e.g., waiting on I/O) does not block the underlying OS carrier thread — the JVM parks the virtual thread and reuses the carrier.
+  - **Key consequence**: You no longer need reactive/async programming purely to avoid blocking. Write synchronous code; get the concurrency benefits of async.
+  - `Thread.ofVirtual().start(task)` or `Executors.newVirtualThreadPerTaskExecutor()`
 
   **What changes for a TL:**
-    - Thread pools are no longer the primary tool for I/O-bound workloads — virtual thread per task is simpler.
-    - `ThreadLocal` is safe but can cause memory bloat with millions of virtual threads. Prefer `ScopedValue` (preview in Java 21).
-    - CPU-bound tasks still need platform threads (virtual threads don't give you more CPU cores).
-    - Libraries that use `synchronized` internally (JDBC drivers, some Netty paths) can pin virtual threads to their carrier — monitor with JFR event `jdk.VirtualThreadPinned`.
+  - Thread pools are no longer the primary tool for I/O-bound workloads — virtual thread per task is simpler.
+  - `ThreadLocal` is safe but can cause memory bloat with millions of virtual threads. Prefer `ScopedValue` (preview in Java 21).
+  - CPU-bound tasks still need platform threads (virtual threads don't give you more CPU cores).
+  - Libraries that use `synchronized` internally (JDBC drivers, some Netty paths) can pin virtual threads to their carrier — monitor with JFR event `jdk.VirtualThreadPinned`.
 
   **Structured concurrency (Java 21 preview):**
-    - Enforces a parent-child relationship between concurrent tasks. If a subtask fails, siblings are cancelled automatically. If the parent scope exits, all subtasks are done.
-    - Eliminates the class of bugs where a fire-and-forget task outlives its logical context.
+  - Enforces a parent-child relationship between concurrent tasks. If a subtask fails, siblings are cancelled automatically. If the parent scope exits, all subtasks are done.
+  - Eliminates the class of bugs where a fire-and-forget task outlives its logical context.
 
 ```java
 try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
@@ -1773,294 +1547,3 @@ try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
 }
 // If either subtask throws, the other is cancelled automatically
 ```
- 
----
-
-
-### Performance Profiling & JVM Deep Dives
-
-* [x] **Walk me through diagnosing a latency spike in production**
-    1. **Correlate first**: Check GC logs / JFR — is the latency spike at the same time as a Full GC or long GC pause? If yes, the fix is GC tuning (heap size, GC algorithm, allocation rate).
-    2. **Thread state**: take a thread dump (`jstack` or `kill -3`) during the spike. Are threads `BLOCKED`? On what lock? This points to lock contention.
-    3. **CPU profile**: use async-profiler (`-e cpu`) attached to the running JVM. Flame graph shows where CPU time is actually spent — often reveals unexpected serialisation, regex, or reflection overhead.
-    4. **Allocation profile**: async-profiler `-e alloc`. High allocation rate → frequent GC → latency. Find what's allocating (often string concatenation in hot paths, or unnecessary object creation in mappers).
-    5. **I/O and external calls**: if the above are clear, the bottleneck is usually a downstream service. Check connection pool saturation (`HikariPool` metrics), slow queries (slow query log), or missing timeouts causing thread pile-up.
-    6. **JFR continuous recording**: in production, always have JFR running with low overhead settings. You can retrieve a recording after the fact and inspect it in JDK Mission Control.
-
----
-* [x] **What JVM flags do you audit before a service goes to production?**
-
-```bash
-# Container-aware heap sizing (Java 11+)
--XX:+UseContainerSupport
--XX:MaxRAMPercentage=75.0          # leave headroom for off-heap, Metaspace, stack
- 
-# GC — G1 for most services, ZGC for latency-sensitive
--XX:+UseG1GC
--XX:MaxGCPauseMillis=200
- 
-# Prevent Metaspace growth surprises
--XX:MaxMetaspaceSize=256m
- 
-# Startup: skip class verification for known-good JARs
--XX:TieredStopAtLevel=1            # use only for fast startup (Lambda) — disables JIT
- 
-# Observability — always on in production
--Xlog:gc*:file=/var/log/gc.log:time,uptime:filecount=5,filesize=20m
--XX:StartFlightRecording=settings=default,filename=/tmp/recording.jfr,dumponexit=true
- 
-# OOM diagnostics
--XX:+HeapDumpOnOutOfMemoryError
--XX:HeapDumpPath=/tmp/heapdump.hprof
--XX:+ExitOnOutOfMemoryError        # fail fast — zombie processes are worse than restarts
-```
-
-**Flag you should remove from old configs:**
-- `-XX:+UseConcMarkSweepGC` — removed in Java 14
-- `-XX:PermSize` / `-XX:MaxPermSize` — PermGen is gone since Java 8
-
----
-
-### Code Review & Technical Leadership
-
-* [x] **What do you look for in a PR beyond correctness?**
-    - **Readability first**: code is read far more than it is written. Variable names, method length, comment quality (why, not what).
-    - **Test quality**: are tests testing behaviour or implementation? Brittle tests (mocking private methods, testing internal state) are worse than no tests — they resist refactoring.
-    - **Error handling**: what happens on the unhappy path? Are exceptions handled at the right level, or swallowed silently?
-    - **Concurrency**: is shared mutable state properly guarded? Are thread-pool sizes hardcoded or configurable?
-    - **Observability**: does new code emit metrics, structured logs with trace IDs, and meaningful health indicators?
-    - **Security**: is user input validated? Are secrets hardcoded? Are SQL queries parameterised?
-    - **Backward compatibility**: for API changes, is the contract additive or breaking? Is there a migration path?
-
----
-* [x] **How do you enforce architectural boundaries in a large Java codebase?**
-    - **ArchUnit** — write architecture tests that run in CI:
-    ```java
-    @AnalyzeClasses(packages = "com.myapp")
-    class ArchitectureTest {
-        @ArchTest
-        ArchRule layerRule = layeredArchitecture()
-            .consideringAllDependencies()
-            .layer("Controller").definedBy("..controller..")
-            .layer("Service").definedBy("..service..")
-            .layer("Repository").definedBy("..repository..")
-            .whereLayer("Controller").mayNotBeAccessedByAnyLayer()
-            .whereLayer("Repository").mayOnlyBeAccessedByLayers("Service");
-    }
-    ```
-
-    - **Package-private visibility**: classes that shouldn't leave a module are `package-private` by default, not `public`. Access modifier is your first enforcement layer.
-    - **JPMS module boundaries**: in greenfield code, `module-info.java` enforces at compiler level what ArchUnit enforces at test level.
-    - **ADRs (Architecture Decision Records)**: document decisions and their rationale in the repo. New team members understand *why* a boundary exists, not just that it does.
-
----
-* [x] **How do you handle a situation where a senior engineer on your team disagrees with your technical decision?**
-    - First, assume they might be right. Ask them to walk you through their concern — often they have context you're missing.
-    - Separate **preference** from **principle**. Disagreements on code style or library choice should go to team standards and be resolved once, not relitigated per PR. Disagreements on architecture or correctness warrant a proper design discussion.
-    - Use **decision criteria agreed upfront**: performance benchmarks, operational complexity, onboarding cost. When the decision is framed against criteria both parties accept, it becomes less personal.
-    - If still unresolved: **time-box an experiment** (spike), or escalate to a design review with broader team input. Avoid "because I said so" — it destroys trust and you lose the signal that the disagreement carries.
-    - **Document the outcome** in an ADR so the decision isn't revisited at every subsequent PR.
-
----
-
-### Design Patterns in Java (Product Company Favourites)
-
-* [ ] **Explain the Singleton pattern. What are all the ways to implement it safely in Java?**
-    * Singleton ensures only one instance of a class exists in the JVM. There are 4 ways to implement it, each with different thread-safety and lazy-init tradeoffs:
-    * **1. Eager initialization (simplest, always correct):**
-    ```java
-    public class Singleton {
-        private static final Singleton INSTANCE = new Singleton(); // created at class load
-        private Singleton() {}
-        public static Singleton getInstance() { return INSTANCE; }
-    }
-    ```
-    * **2. Initialization-on-demand holder (lazy, thread-safe, no synchronization overhead — recommended):**
-    ```java
-    public class Singleton {
-        private static class Holder {
-            static final Singleton INSTANCE = new Singleton(); // lazy — loaded when Holder is first accessed
-        }
-        private Singleton() {}
-        public static Singleton getInstance() { return Holder.INSTANCE; }
-    }
-    // Classloader guarantees single initialization — no synchronized keyword needed
-    ```
-    * **3. Double-checked locking with `volatile`:** (covered in multithreading section — works but more complex than holder idiom)
-    * **4. Enum singleton (serialization-safe, reflection-proof — Effective Java recommendation):**
-    ```java
-    public enum Singleton {
-        INSTANCE;
-        public void doSomething() { ... }
-    }
-    // Enum guarantees single instance, even through serialization and reflection attacks
-    ```
-    * **Testability problem:** Singletons make unit testing hard — you can't easily swap the instance with a mock. In Spring Boot, prefer Spring-managed singletons (`@Bean` scope = singleton by default) over manual Singleton pattern — Spring's DI makes them injectable and mockable.
-
----
-* [ ] **Explain the Builder pattern. When is it essential vs overkill?**
-    * Builder separates object construction from its representation — used when an object has many optional parameters, making constructors with many arguments (telescoping constructors) unreadable and error-prone.
-    ```java
-    // ❌ Telescoping constructor — positional args, easy to swap two params silently
-    new AdConfig("banner", 300, 250, true, false, "jpg", null, null);
-
-    // ✅ Builder — self-documenting, validation in build(), immutable result
-    AdConfig config = AdConfig.builder()
-        .format("banner")
-        .width(300)
-        .height(250)
-        .trackable(true)
-        .mimeType("jpg")
-        .build(); // validate all required fields here
-    ```
-    * **Lombok `@Builder`** generates the builder automatically — use it for DTOs and domain objects.
-    * **Essential when:** ≥4 parameters, many optional fields, immutable object desired, want validation at construction time.
-    * **Overkill when:** 2–3 parameters, all required, simple data class — use a plain constructor or record.
-
----
-* [ ] **Explain the Strategy, Observer, and Factory patterns with real production examples.**
-    * **Strategy** — defines a family of algorithms, encapsulates each one, makes them interchangeable. Eliminates `if-else`/`switch` on type.
-    ```java
-    // Ad pricing strategy — different algorithms per customer tier
-    interface PricingStrategy {
-        double calculate(Ad ad, Context ctx);
-    }
-    class CpmPricing implements PricingStrategy { ... }
-    class CpcPricing implements PricingStrategy { ... }
-    class FlatRatePricing implements PricingStrategy { ... }
-
-    class AdPricer {
-        private final PricingStrategy strategy;
-        AdPricer(PricingStrategy strategy) { this.strategy = strategy; }
-        double price(Ad ad, Context ctx) { return strategy.calculate(ad, ctx); }
-    }
-    // Add new pricing model: write a new class, no changes to AdPricer or callers — Open/Closed Principle
-    ```
-    * **Observer** — subject notifies multiple observers when its state changes. Used in event systems, reactive streams, Spring's `ApplicationEvent`.
-    ```java
-    // Decoupled post-order processing — order service doesn't know about inventory, email, analytics
-    // placeOrder()
-    //         └─ publishEvent()
-    //                 └─ onOrderPlaced()
-    // If the listener throws an exception, it propagates to the caller.
-    @Component
-    public class OrderPlacedEventHandler {
-        // By default, listeners execute in the same thread:
-         
-        @EventListener
-        public void onOrderPlaced(OrderPlacedEvent event) {
-            inventoryService.reserve(event.getItems());
-            emailService.sendConfirmation(event.getCustomerId());
-            analyticsService.record(event);
-        }
-  
-       @Async   // Spring executes it on a separate thread.
-       @EventListener
-       public void onOrderPlaced(OrderPlacedEvent event) {
-       
-       }
-    }
-  
-    @Service
-    public class OrderService {
-
-      @Autowired
-      private ApplicationEventPublisher publisher;
-
-      public void placeOrder(Order order) {
-        // Save order to DB
-        orderRepository.save(order);
-
-        // Publish event
-        publisher.publishEvent(new OrderPlacedEvent(order));
-      }
-  }
-    ```
-    * **Factory** — delegates object creation to a factory method or class, hiding the concrete type. Use when the exact type to instantiate depends on runtime conditions.
-    ```java
-    interface NotificationSender { void send(String message, String target); }
-    class EmailSender implements NotificationSender { ... }
-    class SmsSender implements NotificationSender { ... }
-    class PushSender implements NotificationSender { ... }
-
-    class NotificationFactory {
-        static NotificationSender create(String channel) {
-            return switch (channel) {
-                case "email" -> new EmailSender();
-                case "sms"   -> new SmsSender();
-                case "push"  -> new PushSender();
-                default -> throw new IllegalArgumentException("Unknown channel: " + channel);
-            };
-        }
-    }
-    ```
-
----
-
-### Object-Oriented Design (OOP Depth)
-
-
----
-* [ ] **What is the difference between composition and inheritance? When do you use each?**
-    * **Inheritance (IS-A):** Use when the subclass truly IS a specialization of the base class and needs to be substitutable for it (Liskov). `Dog extends Animal`. Good for polymorphism through base type references.
-    * **Composition (HAS-A):** The class contains an instance of another class and delegates to it. `Car HAS-A Engine`. Preferred over inheritance in most cases because:
-        * No tight coupling to parent's implementation details — if the parent changes an internal method, the child may break silently.
-        * You can compose multiple behaviors; you can only extend one class.
-        * Easier to unit test — inject mock collaborators via constructor.
-    * **"Favor composition over inheritance"** (Effective Java Item 18): Use inheritance only when the IS-A relationship is genuine and you need polymorphism. Otherwise compose.
-    ```java
-    // ❌ Inheritance for code reuse — wrong reason
-    class InstrumentedHashSet<E> extends HashSet<E> {
-        // Overriding addAll() and counting elements breaks because HashSet.addAll() calls add() internally
-        // Your override gets called twice per element — classic inheritance pitfall
-    }
-
-    // ✅ Composition — delegate, don't extend
-    class InstrumentedSet<E> implements Set<E> {
-        private final Set<E> delegate;
-        private int addCount = 0;
-        InstrumentedSet(Set<E> s) { this.delegate = s; }
-        public boolean add(E e) { addCount++; return delegate.add(e); }
-        public boolean addAll(Collection<? extends E> c) { addCount += c.size(); return delegate.addAll(c); }
-        // delegate all other methods to this.delegate
-    }
-    ```
-
----
-
-### Production Scenarios & System Design in Java
-
-
----
-* [ ] **How would you implement a thread-safe, fixed-size, bounded LRU cache in Java without using any external library?**
-    * Combine `LinkedHashMap` (access-ordered) + `ReentrantReadWriteLock` for concurrency:
-    ```java
-    public class BoundedLRUCache<K, V> {
-        private final int capacity;
-        private final LinkedHashMap<K, V> map;
-        private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
-
-        public BoundedLRUCache(int capacity) {
-            this.capacity = capacity;
-            this.map = new LinkedHashMap<>(capacity, 0.75f, true) { // accessOrder=true
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<K,V> eldest) {
-                    return size() > capacity;
-                }
-            };
-        }
-
-        public V get(K key) {
-            lock.readLock().lock();  // reads can be concurrent
-            try { return map.get(key); }
-            finally { lock.readLock().unlock(); }
-        }
-
-        public void put(K key, V value) {
-            lock.writeLock().lock(); // writes are exclusive
-            try { map.put(key, value); }
-            finally { lock.writeLock().unlock(); }
-        }
-    }
-    ```
-    * **Interview follow-up:** Why not `Collections.synchronizedMap()`? It uses a single lock for all operations — `get()` and `put()` cannot be concurrent. `ReadWriteLock` allows concurrent reads. For production use, `Caffeine` cache is far better — non-blocking, highly concurrent, configurable TTL and size, Micrometer metrics built in.

@@ -31,11 +31,6 @@
 - [Q16. What is volatile — What it solves and what it does NOT solve](#q16-what-is-volatile--what-it-solves-and-what-it-does-not-solve)
 - [Q17. What is ReentrantLock — How is it different from synchronized](#q17-what-is-reentrantlock--how-is-it-different-from-synchronized)
 
-### Java Memory Model
-- [Q18. Why can two threads see different values for the same variable](#q18-why-can-two-threads-see-different-values-for-the-same-variable)
-- [Q19. What is Happens-Before — Why does it matter](#q19-what-is-happens-before--why-does-it-matter)
-- [Q20. What is Double-Checked Locking bug — Why does it break without volatile](#q20-what-is-double-checked-locking-bug--why-does-it-break-without-volatile)
-
 ### Concurrent Data Structures
 - [Q21. How does ConcurrentHashMap work internally](#q21-how-does-concurrenthashmap-work-internally)
 - [Q22. What is AtomicInteger — What is CAS at CPU level](#q22-what-is-atomicinteger--what-is-cas-at-cpu-level)
@@ -43,7 +38,6 @@
 
 ### Thread Coordination
 - [Q24. What is wait()/notify() — How do they work](#q24-what-is-waitnotify--how-do-they-work)
-- [Q25. CountDownLatch vs CyclicBarrier vs Semaphore](#q25-countdownlatch-vs-cyclicbarrier-vs-semaphore)
 - [Q26. What is ExecutorService — How does a thread pool work internally](#q26-what-is-executorservice--how-does-a-thread-pool-work-internally)
 
 ### Modern Java
@@ -1360,237 +1354,6 @@ new ReentrantLock(true);  // fair — threads acquire in FIFO order
 
 ---
 
-### Q18. Why can two threads see different values for the same variable
-
-#### The Problem First
-You'd expect that if Thread 1 writes `x = 5`, Thread 2 reading `x` immediately after sees `5`. This is often not true. Understanding why is the foundation of all concurrent programming in Java.
-
-#### Three Reasons
-
-**Reason 1 — CPU Cache**
-```
-Core 1 (Thread 1)          Core 2 (Thread 2)
-x = 5 → L1 cache           reads x → L1 cache = 0 (stale)
-         ↓ (not yet)
-      Main Memory: x = 0
-```
-The write is buffered in Core 1's L1 cache (store buffer). It hasn't propagated to main memory or Core 2's cache yet. Core 2 reads the old value.
-
-**Reason 2 — JIT Reordering**
-JIT may decide two operations are independent and swap their order:
-```java
-// You wrote:
-ready = true;
-        data = 42;
-
-// JIT may execute as:
-        data = 42;
-        ready = true;
-// or even cache 'ready' in a register and never re-read from memory
-```
-
-**Reason 3 — Compiler Optimization**
-JIT may see that `stop` is never written in Thread 2's loop and optimize it to:
-```java
-// Original:
-while (!stop) { doWork(); }
-
-// JIT optimized (stop hoisted out of loop — read once):
-        if (!stop) {
-        while (true) { doWork(); }  // infinite loop — never re-reads stop
-        }
-```
-
-#### The Fix — Establish Happens-Before
-All three problems are solved by establishing a **happens-before** relationship. The mechanisms: `volatile`, `synchronized`, `Thread.start()`, `Thread.join()`.
-
-#### How to Explain in Interview
-> "Two threads can see different values for the same variable for three reasons: CPU cache — writes go to the writing core's cache first, not immediately to main memory or other cores' caches; JIT reordering — JIT is allowed to reorder independent operations for optimization; and compiler hoisting — JIT may read a variable once and cache it in a register, never re-reading. All three are solved by establishing happens-before relationships through volatile, synchronized, or Thread.join()."
-
----
-
-### Q19. What is Happens-Before — Why does it matter
-
-#### The Concept
-
-Happens-before is a guarantee: if operation A **happens-before** operation B, then:
-1. All writes done by A (and everything before A) are **visible** to B
-2. All those writes appear to have happened **before** B's reads
-
-It's not about time. Two operations can happen at the same real time but still have a happens-before relationship if the JMM guarantees it.
-
-#### The Six Happens-Before Rules
-
-**Rule 1 — Program order within a thread**
-```java
-// Within one thread — line 1 always happens-before line 2
-x = 5;      // line 1
-        y = x + 1;  // line 2 — guaranteed to see x=5
-```
-
-**Rule 2 — Monitor unlock → next lock**
-```java
-synchronized(lock) { x = 5; }  // unlock
-// ...
-synchronized(lock) { y = x; }  // next lock — guaranteed to see x=5
-```
-
-**Rule 3 — volatile write → subsequent volatile read**
-```java
-volatile int v;
-        v = 5;       // write
-// ...
-        int r = v;   // read — guaranteed to see 5 (and everything written before v=5)
-```
-
-**Rule 4 — Thread.start()**
-```java
-x = 5;
-        t.start();
-// Inside t.run() — guaranteed to see x=5
-```
-
-**Rule 5 — Thread.join()**
-```java
-t.join();
-// After join returns — guaranteed to see everything t wrote
-```
-
-**Rule 6 — Transitivity**
-If A happens-before B and B happens-before C, then A happens-before C.
-
-#### Why This Matters in Practice
-
-```java
-// Without happens-before — BROKEN
-int data = 0;
-        boolean ready = false;
-
-// Thread 1
-        data = 42;
-        ready = true;
-
-// Thread 2
-        if (ready) {
-        System.out.println(data);  // may print 0! No happens-before established
-        }
-```
-
-```java
-// With volatile — CORRECT
-int data = 0;
-volatile boolean ready = false;
-
-// Thread 1
-        data = 42;
-        ready = true;   // volatile write — happens-before any subsequent read of ready
-        // also: data=42 happens-before ready=true (program order, rule 1)
-        // transitivity: data=42 happens-before any read of ready
-
-// Thread 2
-        if (ready) {
-        System.out.println(data);  // guaranteed to see 42
-        }
-```
-
-#### How to Explain in Interview
-> "Happens-before is the JMM's formal guarantee of visibility and ordering between threads. If A happens-before B, all writes made before A are visible to B and appear ordered before B. The key rules: unlock of a monitor happens-before the next lock of the same monitor; volatile write happens-before any subsequent read of that variable; Thread.start() happens-before anything inside run(); Thread.join() means everything the thread did happens-before join() returns. Without an explicit happens-before relationship between two threads, the JVM makes zero guarantees about visibility."
-
----
-
-### Q20. What is Double-Checked Locking bug — Why does it break without volatile
-
-#### The Problem First
-You want a singleton. Creating it is expensive (loads config, opens DB connection). You want lazy initialization — create only when first needed. And you want thread-safe initialization without paying synchronization cost on every access.
-
-#### Attempt 1 — Broken (No synchronization)
-```java
-private static Singleton instance;
-
-public static Singleton getInstance() {
-        if (instance == null) {
-        instance = new Singleton();  // two threads both enter here simultaneously
-        }
-        return instance;
-        }
-// Race condition — two Singleton instances created
-```
-
-#### Attempt 2 — Correct but slow
-```java
-public static synchronized Singleton getInstance() {
-        if (instance == null) {
-        instance = new Singleton();
-        }
-        return instance;
-        }
-// Thread-safe but every call pays synchronized cost
-// After initialization, singleton never changes — why pay lock cost?
-```
-
-#### Attempt 3 — Double-Checked Locking (Broken without volatile)
-```java
-private static Singleton instance;  // ← MISSING volatile
-
-public static Singleton getInstance() {
-        if (instance == null) {              // check 1 — no lock
-synchronized (Singleton.class) {
-        if (instance == null) {      // check 2 — inside lock
-        instance = new Singleton();
-        }
-        }
-        }
-        return instance;
-        }
-```
-
-**Why this breaks:** `instance = new Singleton()` is three steps:
-1. Allocate memory
-2. Run constructor (initialize fields)
-3. Assign reference to `instance`
-
-JIT can reorder step 3 before step 2:
-1. Allocate memory
-2. Assign reference to `instance`  ← reordered! instance is now non-null
-3. Run constructor
-
-```
-Thread 1: allocate → ASSIGN instance (non-null, unconstructed) → run constructor
-Thread 2:               reads instance → non-null! → returns broken object
-```
-
-Thread 2 passes check 1 (instance is non-null), skips synchronized block, returns the partially constructed object whose constructor hasn't run yet. **Data corruption.**
-
-#### The Fix — volatile
-
-```java
-private static volatile Singleton instance;  // volatile prevents reordering
-```
-
-`volatile` inserts a **memory barrier** before the volatile write. The barrier prevents steps 2 and 3 from reordering — constructor MUST complete before the reference is assigned.
-
-```java
-// Correct DCL
-private static volatile Singleton instance;
-
-public static Singleton getInstance() {
-        if (instance == null) {
-synchronized (Singleton.class) {
-        if (instance == null) {
-        instance = new Singleton();  // volatile write — no reorder possible
-        }
-        }
-        }
-        return instance;
-        }
-```
-
-After first initialization: `instance` is non-null. All subsequent calls hit check 1, see non-null, return immediately — no synchronization cost. Thread-safe and fast.
-
-#### How to Explain in Interview
-> "Double-checked locking attempts lazy singleton initialization without paying synchronization cost after initialization. The bug: object construction is three steps — allocate, construct, assign. JIT can reorder to allocate, assign, construct. Thread 2 sees non-null assignment, skips the synchronized block, and gets a partially constructed object. Fix: volatile on the instance field. volatile inserts a memory barrier that prevents the assign from moving before the constructor completes. After that fix, DCL is the standard pattern for lazy initialization in Java."
-
----
 
 ## Concurrent Data Structures
 
@@ -1898,103 +1661,6 @@ Always use `while`, never `if`, when checking the condition around `wait()`.
 > "wait() and notify() enable inter-thread coordination without busy-waiting. wait() does three things atomically: releases the object's monitor, parks the thread, and adds it to the object's wait set — thread is fully asleep, zero CPU. notify() moves one thread from the wait set back to competing for the lock. Critical rule: always use while loop around wait(), not if. The OS can issue spurious wakeups — waking a thread without notify() being called. The while loop rechecks the condition and goes back to wait if the condition is still false."
 
 ---
-
-### Q25. CountDownLatch vs CyclicBarrier vs Semaphore
-
-#### The Problem First
-Three different coordination problems:
-1. Wait for N tasks to complete before proceeding
-2. Make N threads meet at a checkpoint before all continue
-3. Limit how many threads can access a resource simultaneously
-
-Three different tools.
-
----
-
-#### CountDownLatch — Wait for N events
-
-```java
-CountDownLatch latch = new CountDownLatch(3);  // count = 3
-
-// Three worker threads, each calls:
-        latch.countDown();  // count decrements: 3 → 2 → 1 → 0
-
-// Main thread waits:
-        latch.await();  // blocks until count reaches 0
-// continues after all 3 workers are done
-```
-
-**Key property:** one-time use — count can't be reset. Once it hits 0, all `await()` calls return immediately from that point on.
-
-**Real use case:** Service startup — wait for DB connection, Kafka consumer, and config load to all complete before accepting HTTP requests.
-
-```java
-CountDownLatch startupLatch = new CountDownLatch(3);
-        initDatabase(startupLatch);    // calls countDown() when ready
-        initKafka(startupLatch);       // calls countDown() when ready
-        initConfig(startupLatch);      // calls countDown() when ready
-        startupLatch.await();          // wait for all three
-        startHttpServer();             // now safe to start
-```
-
----
-
-#### CyclicBarrier — Make N threads meet at a checkpoint
-
-```java
-CyclicBarrier barrier = new CyclicBarrier(3);  // 3 threads must meet
-
-// Each of the 3 threads calls:
-        barrier.await();  // blocks here until all 3 have called await()
-// all 3 continue TOGETHER after all have arrived
-```
-
-**Key difference from latch:** CyclicBarrier is **reusable** — after all threads pass, it resets automatically for the next round.
-
-**Real use case:** Parallel computation phases — split work across N threads, wait for all to finish phase 1, then all proceed to phase 2.
-
-```java
-// Parallel matrix multiplication:
-// Round 1: all threads compute their partition
-barrier.await();  // wait for all partitions done
-// Round 2: all threads combine results
-        barrier.await();  // wait again
-// Round 3: all threads write output
-```
-
----
-
-#### Semaphore — Limit concurrent access
-
-```java
-Semaphore semaphore = new Semaphore(5);  // max 5 threads allowed simultaneously
-
-// Each thread:
-        semaphore.acquire();  // claims one permit — blocks if 0 permits available
-        try {
-        callExternalApi();  // only 5 threads in here at once
-        } finally {
-        semaphore.release();  // returns permit
-        }
-```
-
-**Real use case:** Rate limiting calls to an external service — only allow N concurrent outbound connections.
-
-At Zee5, we used a Semaphore to limit concurrent calls to the third-party ad exchange to 50 — beyond that, requests queued rather than overwhelming the exchange.
-
----
-
-#### Quick Comparison
-
-| | CountDownLatch | CyclicBarrier | Semaphore |
-|---|---|---|---|
-| Purpose | Wait for N events | Sync N threads at checkpoint | Limit concurrent access |
-| Reusable? | No | Yes | Yes |
-| Who counts down? | Workers | Waiting threads themselves | Acquirers |
-| Unblocks when? | Count reaches 0 | All threads arrived | Permit available |
-
-#### How to Explain in Interview
-> "Three different coordination problems — three different tools. CountDownLatch: one thread waits for N other threads to complete. Workers call countDown(), waiter calls await(). One-time use. CyclicBarrier: N threads all wait for each other at a checkpoint before continuing together. All call await(), all proceed when all have arrived. Reusable — good for multi-phase parallel computation. Semaphore: limits how many threads can access something simultaneously. acquire() blocks if no permits left, release() returns a permit. Used for connection pool limiting or rate-limiting calls to external services."
 
 ---
 
@@ -2364,6 +2030,390 @@ pool.submit(() -> {
 
 > **Rule of thumb:** Use it for CPU work. For blocking tasks, always pass a custom `ExecutorService` to avoid starving the shared pool.
 ---
+
+
+---
+
+
+*Built for TalentNeuron Java Backend Lead Interview Preparation*
+
+---
+
+# 🔴 New Sections: Staff / Principal Engineer (11+ Years)
+
+---
+
+## Q49. How does HashMap work internally — Hash collisions, treeification, resizing
+
+#### The Problem First
+Used daily but rarely understood deeply. At senior levels, interviewers at Flipkart, Amazon, and Razorpay probe the exact mechanics.
+
+#### Internal Array + Hashing
+HashMap is backed by `Node[] table` (default 16 buckets).
+
+```java
+int hash = key.hashCode() ^ (key.hashCode() >>> 16); // spread high bits
+int bucket = hash & (capacity - 1); // fast modulo — works only for power-of-2 sizes
+```
+
+#### Collision → Linked List → Tree
+- Same bucket → entries form a **linked list** (O(n) lookup)
+- List length > **8** AND table size > **64** → converts to **red-black tree** (O(log n))
+- Tree shrinks back to list if size drops below **6**
+
+```
+Bucket[3]:  Node("A") → Node("B") → Node("C") ... → Node("H") → TreeNode (after 8th)
+```
+
+#### Resizing — Load Factor 0.75
+When `size > capacity * 0.75`, HashMap doubles capacity and **rehashes every entry**. This is O(n) — can cause latency spikes under load.
+
+```java
+// Production fix: pre-size if you know expected entries
+Map<String, User> map = new HashMap<>(expectedSize / 0.75 + 1);
+```
+
+#### Production Pitfall — mutable keys
+If a key's `hashCode()` changes after insertion (mutable object as key), the entry is permanently lost — `get()` computes a different bucket and never finds it.
+
+#### Interview Answer
+> "HashMap is an array of buckets. Key's hashCode is spread via XOR with upper bits, then modulo'd to find the bucket. Collisions chain as linked lists. At 8 entries per bucket with table size ≥ 64, the list converts to a red-black tree for O(log n) lookup. Resizing happens at 75% load — it doubles capacity and rehashes all entries, which is O(n). Pre-size large maps to avoid mid-operation resizes. Never use mutable objects as keys."
+
+---
+
+## Q50. LinkedHashMap vs TreeMap vs EnumMap — When to use which
+
+| | LinkedHashMap | TreeMap | EnumMap |
+|---|---|---|---|
+| Order | Insertion order (or LRU access order) | Sorted by key (natural/Comparator) | Enum declaration order |
+| Internal | HashMap + doubly linked list | Red-black tree | Simple array |
+| get/put | O(1) | O(log n) | O(1) |
+| Best for | LRU Cache, ordered iteration | Range queries, sorted output | Enum-keyed config/state |
+
+```java
+// LRU Cache with LinkedHashMap (production pattern)
+Map<String, Data> lru = new LinkedHashMap<>(128, 0.75f, true) {
+    protected boolean removeEldestEntry(Map.Entry<String, Data> e) {
+        return size() > 1000;
+    }
+};
+
+// Range queries with TreeMap
+TreeMap<Long, Event> timeline = new TreeMap<>();
+timeline.subMap(startTime, endTime).values(); // all events in range — O(log n + k)
+
+// EnumMap for state machines — zero boxing, array-backed
+EnumMap<OrderStatus, Handler> handlers = new EnumMap<>(OrderStatus.class);
+```
+
+#### Interview Answer
+> "LinkedHashMap maintains insertion order by wrapping HashMap entries in a doubly linked list — useful for LRU caches with the access-order constructor. TreeMap is a red-black tree — O(log n) but gives sorted iteration and range queries via subMap/headMap/tailMap. EnumMap is an array indexed by enum ordinal — O(1) and zero boxing overhead, ideal for enum-keyed state machines or config tables."
+
+---
+
+## Q51. ArrayList vs LinkedList — Real performance trade-offs
+
+#### The Truth Most Candidates Get Wrong
+Interviewers expect you to say "LinkedList is O(1) insert at middle." The real answer is more nuanced.
+
+```
+ArrayList: Object[] array, resizes by 1.5x when full
+LinkedList: doubly-linked list, each node has prev/next pointers
+```
+
+| Operation | ArrayList | LinkedList |
+|---|---|---|
+| get(i) | O(1) — direct array index | O(n) — traverse from head |
+| add at end | O(1) amortized | O(1) |
+| add at middle | O(n) — shift elements | O(n) — must traverse to position first |
+| Memory | Compact — CPU cache friendly | Each node = object + 2 pointers = 3x memory |
+| Iteration | Very fast — cache line prefetch | Slow — pointer chasing, cache misses |
+
+#### The Cache Line Reality
+ArrayList elements are contiguous in memory. CPU prefetches the next elements automatically. LinkedList node traversal is pointer-chasing — every node access is a potential cache miss.
+
+**In practice: ArrayList almost always wins for collections under 100K elements.**
+
+#### When LinkedList Actually Wins
+- You have a `Deque` (addFirst/removeFirst at both ends) → use `ArrayDeque` instead (still beats LinkedList)
+- Iterator-based removals in the middle of very frequent structural modifications
+
+#### Interview Answer
+> "ArrayList is a resizable array — O(1) random access, O(n) mid-insertion due to shifting. LinkedList is O(n) to reach a position, so mid-insertion is also O(n) despite O(1) node pointer update. LinkedList has 3x memory overhead per element and destroys CPU cache locality — pointer chasing causes cache misses on every traversal. In production I almost always use ArrayList. For queue/deque semantics I use ArrayDeque, which beats LinkedList at both ends too."
+
+---
+
+## Q52. How does PriorityQueue work internally — Heap data structure
+
+#### Internals
+PriorityQueue is a **min-heap** stored as an array. `poll()` returns the smallest element.
+
+```
+Heap array:  [1, 3, 2, 7, 4, 5, 6]
+As tree:
+        1
+       / \
+      3   2
+     / \ / \
+    7  4 5  6
+```
+
+- `offer(x)` → add at end, **sift up**: swap with parent until heap property restored — O(log n)
+- `poll()` → remove root, move last element to root, **sift down** — O(log n)
+- `peek()` → return `array[0]` — O(1)
+
+#### Production Use Cases
+```java
+// Top-K elements (e.g., top 10 trending products)
+PriorityQueue<Product> topK = new PriorityQueue<>(10, Comparator.comparingInt(Product::getScore));
+// Keep only top 10: if size > 10, poll() removes smallest
+
+// Task scheduling by priority
+PriorityQueue<Task> queue = new PriorityQueue<>(Comparator.comparingInt(Task::getPriority));
+```
+
+**Not thread-safe** → use `PriorityBlockingQueue` in concurrent code.
+
+#### Interview Answer
+> "PriorityQueue is a min-heap stored in an array. Offer adds at end and sifts up — O(log n). Poll removes the root (minimum), places last element at root, sifts down — O(log n). Peek is O(1). For thread-safe priority queues in producer-consumer patterns use PriorityBlockingQueue."
+
+---
+
+## Q56. How does Stream pipeline execute — Lazy evaluation internals
+
+#### The Problem
+Most developers think `stream()` processes elements immediately. It does not.
+
+#### Lazy Evaluation
+
+```java
+List<String> result = list.stream()
+    .filter(s -> s.startsWith("A"))   // NOT executed yet
+    .map(String::toUpperCase)          // NOT executed yet
+    .limit(3)                          // NOT executed yet
+    .collect(toList());                // THIS triggers execution
+```
+
+**Terminal operation triggers the pipeline.** Until then, nothing runs.
+
+#### How It Works Internally
+
+Stream wraps each operation in a `StatelessOp` or `StatefulOp` stage. At terminal execution, the JVM creates a **spliterator** and drives elements through all stages in **one pass**:
+
+```
+element "Alice"  → filter ✓ → map → "ALICE" → limit (count=1) → collected
+element "Bob"    → filter ✗ (skipped entirely — map never called)
+element "Anna"   → filter ✓ → map → "ANNA"  → limit (count=2) → collected
+element "Charlie"→ filter ✗
+element "Amy"    → filter ✓ → map → "AMY"   → limit (count=3) → STOP (limit reached)
+```
+
+**Short-circuit operations** (`limit`, `findFirst`, `anyMatch`) can stop the entire pipeline early — elements after the limit are never processed.
+
+#### Production Pitfall — Stream reuse
+```java
+Stream<String> stream = list.stream().filter(...);
+stream.collect(toList()); // OK
+stream.collect(toList()); // IllegalStateException: stream already operated upon
+```
+
+Streams are single-use. In production code, never store streams in fields or pass them between methods.
+
+#### Interview Answer
+> "Stream pipelines are lazy — intermediate operations (filter, map, flatMap) build a description of computation but execute nothing. The terminal operation (collect, forEach, reduce) triggers a single pass through the pipeline. Each element flows through all stages before the next element starts. Short-circuit terminals like limit and findFirst can stop processing early. This means a stream with filter+map+limit(3) processes at most a few elements, not the entire list. Streams are also single-use — calling a terminal operation twice throws IllegalStateException."
+
+---
+
+## Q57. When does parallel stream hurt performance
+
+#### Common Misconception
+`parallelStream()` is not always faster. It frequently makes things worse.
+
+#### When parallel stream HURTS
+
+**1. Small collections** — Fork/Join overhead exceeds the work
+```java
+// For 100 elements — parallelStream is SLOWER
+list.stream().parallel().map(x -> x * 2).collect(toList());
+```
+
+**2. Shared mutable state** — race conditions, results are wrong
+```java
+List<Integer> result = new ArrayList<>();
+list.parallelStream().forEach(result::add); // DATA CORRUPTION — ArrayList is not thread-safe
+```
+
+**3. Ordered operations on ordered streams** — forces synchronization
+```java
+list.parallelStream().forEachOrdered(System.out::println); // serialized — no parallelism benefit
+```
+
+**4. I/O-bound work** — parallel stream uses ForkJoinPool.commonPool() shared across the JVM
+```java
+// This starves other parallel streams and ForkJoin tasks in the app
+list.parallelStream().map(id -> database.findById(id)).collect(toList()); // BAD
+```
+
+#### When parallel stream HELPS
+- CPU-bound operations (heavy computation per element)
+- Large collections (10,000+ elements)
+- Operations where work per element >> coordination cost
+- Stateless operations (no shared mutation)
+
+#### Production Rule
+Use `CompletableFuture` with a dedicated executor for I/O parallel work. Reserve parallel streams for CPU-bound data processing.
+
+#### Interview Answer
+> "Parallel streams use ForkJoinPool.commonPool() shared across the entire JVM. They hurt performance with small collections (coordination overhead exceeds gain), I/O-bound tasks (you block pool threads used by everyone), and shared mutable state (race conditions). They help only for stateless, CPU-bound, large-dataset operations. For I/O-parallel work in production I use CompletableFuture with a custom executor sized to I/O wait ratio. I've seen parallel streams cause cascading thread starvation in production when used for DB calls."
+
+---
+
+## Q65. Event-driven architecture in pure Java — without a framework
+
+#### Core Components
+
+```java
+// 1. Event
+public record OrderPlaced(String orderId, BigDecimal amount, Instant timestamp) {}
+
+// 2. Listener interface
+@FunctionalInterface
+public interface EventListener<E> {
+    void onEvent(E event);
+}
+
+// 3. Thread-safe EventBus
+public class EventBus {
+    private final Map<Class<?>, List<EventListener<Object>>> listeners = new ConcurrentHashMap<>();
+    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+
+    @SuppressWarnings("unchecked")
+    public <E> void subscribe(Class<E> eventType, EventListener<E> listener) {
+        listeners.computeIfAbsent(eventType, k -> new CopyOnWriteArrayList<>())
+                 .add((EventListener<Object>) listener);
+    }
+
+    public <E> void publish(E event) {
+        List<EventListener<Object>> handlers = listeners.get(event.getClass());
+        if (handlers == null) return;
+        for (EventListener<Object> handler : handlers) {
+            executor.submit(() -> {
+                try { handler.onEvent(event); }
+                catch (Exception e) { log.error("Listener failed", e); }
+            });
+        }
+    }
+}
+
+// 4. Usage
+eventBus.subscribe(OrderPlaced.class, event -> inventoryService.reserve(event.orderId()));
+eventBus.subscribe(OrderPlaced.class, event -> emailService.sendConfirmation(event));
+eventBus.publish(new OrderPlaced(orderId, amount, Instant.now()));
+```
+
+**Key decisions explained:**
+- `ConcurrentHashMap` + `CopyOnWriteArrayList` — safe concurrent subscribe/publish
+- `VirtualThreadPerTaskExecutor` — each listener on its own virtual thread, I/O doesn't block others
+- Exception isolation — one listener failure doesn't kill others
+
+---
+
+## Q67. Why is String immutable
+
+#### Reasons (all interviewers expect all four)
+
+**1. String Pool safety** — Multiple references point to the same pool object. If strings were mutable, one reference changing the value would corrupt all others.
+
+**2. Thread safety** — Immutable objects are inherently thread-safe. No synchronization needed when sharing strings across threads.
+
+**3. Security** — Class loading uses string class names. File paths, network addresses passed as strings. If mutable, an attacker could change the value after security checks.
+
+**4. HashMap key safety** — hashCode is cached in String after first computation. If content changed, the cached hash would be wrong and HashMap entries permanently lost.
+
+```java
+// String caches hashCode after first call
+private int hash; // default 0
+public int hashCode() {
+    if (hash == 0 && value.length > 0) {
+        hash = computeHash(); // computed once, cached forever
+    }
+    return hash;
+}
+```
+
+---
+
+
+
+## Production Incident Walkthroughs
+
+---
+
+
+## Q72. Production scenario: OutOfMemoryError every 3 days — Diagnose and fix
+
+#### The Pattern
+OOM every N days = **slow memory leak**. Something is accumulating across requests but not being collected.
+
+#### Step 1 — Capture Heap Dump on OOM (must configure before it happens)
+```bash
+# Add to JVM flags:
+-XX:+HeapDumpOnOutOfMemoryError
+-XX:HeapDumpPath=/var/log/heapdump.hprof
+```
+
+#### Step 2 — Analyze with Eclipse MAT or VisualVM
+```
+Open heapdump.hprof in Eclipse MAT
+→ "Leak Suspects" report
+→ Look for the largest retained heap object graph
+```
+
+Common findings:
+- A `static Map` (cache) that grows unboundedly
+- `ThreadLocal` values not removed in thread pool threads
+- Listeners registered but never deregistered (observer pattern leak)
+- `ClassLoader` leak in hot-deploy scenarios (Metaspace OOM variant)
+
+#### Step 3 — Typical Root Causes and Fixes
+
+**Unbounded static cache:**
+```java
+// BAD
+static Map<String, UserProfile> cache = new HashMap<>(); // grows forever
+
+// FIX: use bounded LRU cache
+static Map<String, UserProfile> cache = Collections.synchronizedMap(
+    new LinkedHashMap<>(1000, 0.75f, true) {
+        protected boolean removeEldestEntry(Map.Entry e) { return size() > 1000; }
+    });
+// Or: use Caffeine/Guava Cache with size limit + TTL
+```
+
+**ThreadLocal leak:**
+```java
+// BAD: set in filter, never removed
+threadLocal.set(requestContext);
+// thread returns to pool with stale context
+
+// FIX: always remove in finally
+try {
+    threadLocal.set(requestContext);
+    chain.doFilter(request, response);
+} finally {
+    threadLocal.remove(); // MANDATORY
+}
+```
+
+#### Interview Answer
+> "OOM every 3 days is a slow memory leak — something accumulates across requests. First I'd ensure HeapDumpOnOutOfMemoryError is configured so the next OOM captures the heap state. Then analyze in Eclipse MAT — the Leak Suspects report shows the largest retained object graphs. Most common causes I've seen: unbounded static caches that grow without eviction, ThreadLocal values not removed in thread pool request handlers, and event listeners registered on startup but never deregistered. The fix depends on the root cause — add size bounds and TTL to caches, add threadLocal.remove() in finally blocks, and use WeakReference for listeners."
+
+---
+
+# TOO MUCH DETAILS
+
+
+
 
 ### Q28. What is CompletableFuture — How does it work
 
@@ -2815,224 +2865,6 @@ completeOnTimeout          → return default after timeout
 ```
 
 
----
-
-## Quick Reference — Interview Cheat Sheet
-
-| Concept | One-line answer |
-|---|---|
-| JIT | Compiles hot methods to native code after ~10K calls; caches in Code Cache |
-| GC Roots | Thread stacks, static fields, active threads — always-live starting points for GC |
-| Stop-the-World(STW) Pause | All threads frozen while GC marks and compacts — Minor GC ~10ms, Full GC seconds |
-| G1GC | Region-based, concurrent marking, tunable pause target — general purpose |
-| ZGC | Concurrent everything via load barriers, <1ms pause, 5-10% CPU overhead — latency critical |
-| Biased Lock | Single thread owns object — mark word stores thread ID, ~1ns acquisition |
-| Heavyweight Lock | OS mutex — threads park/unpark, ~1000ns — avoid on hot paths |
-| volatile | Visibility (cache flush) + ordering (no reorder) — NOT atomicity |
-| Happens-Before | Formal JMM guarantee: A's writes visible to B if A happens-before B |
-| DCL Bug | JIT reorders assignment before constructor — fix: volatile on field |
-| CAS | Single CPU instruction: if(mem==expected) mem=new — hardware atomic, no lock |
-| LongAdder | Distributed cell array — high-throughput counter, beats AtomicLong under contention |
-| ThreadLocal | Value stored in Thread's own map — always remove() in finally in thread pools |
-| CountDownLatch | Wait for N events — one-time use |
-| CyclicBarrier | N threads sync at checkpoint — reusable |
-| Semaphore | Limit N concurrent accessors |
-| Virtual Thread | JVM-managed, heap-allocated, unmounts on I/O block — millions possible |
-| CompletableFuture | thenApply = same thread; thenApplyAsync = new executor submission |
-
----
-
-*Built for TalentNeuron Java Backend Lead Interview Preparation*
-
----
-
-# 🔴 New Sections: Staff / Principal Engineer (11+ Years)
-
----
-
-## Q49. How does HashMap work internally — Hash collisions, treeification, resizing
-
-#### The Problem First
-Used daily but rarely understood deeply. At senior levels, interviewers at Flipkart, Amazon, and Razorpay probe the exact mechanics.
-
-#### Internal Array + Hashing
-HashMap is backed by `Node[] table` (default 16 buckets).
-
-```java
-int hash = key.hashCode() ^ (key.hashCode() >>> 16); // spread high bits
-int bucket = hash & (capacity - 1); // fast modulo — works only for power-of-2 sizes
-```
-
-#### Collision → Linked List → Tree
-- Same bucket → entries form a **linked list** (O(n) lookup)
-- List length > **8** AND table size > **64** → converts to **red-black tree** (O(log n))
-- Tree shrinks back to list if size drops below **6**
-
-```
-Bucket[3]:  Node("A") → Node("B") → Node("C") ... → Node("H") → TreeNode (after 8th)
-```
-
-#### Resizing — Load Factor 0.75
-When `size > capacity * 0.75`, HashMap doubles capacity and **rehashes every entry**. This is O(n) — can cause latency spikes under load.
-
-```java
-// Production fix: pre-size if you know expected entries
-Map<String, User> map = new HashMap<>(expectedSize / 0.75 + 1);
-```
-
-#### Production Pitfall — mutable keys
-If a key's `hashCode()` changes after insertion (mutable object as key), the entry is permanently lost — `get()` computes a different bucket and never finds it.
-
-#### Interview Answer
-> "HashMap is an array of buckets. Key's hashCode is spread via XOR with upper bits, then modulo'd to find the bucket. Collisions chain as linked lists. At 8 entries per bucket with table size ≥ 64, the list converts to a red-black tree for O(log n) lookup. Resizing happens at 75% load — it doubles capacity and rehashes all entries, which is O(n). Pre-size large maps to avoid mid-operation resizes. Never use mutable objects as keys."
-
----
-
-## Q50. LinkedHashMap vs TreeMap vs EnumMap — When to use which
-
-| | LinkedHashMap | TreeMap | EnumMap |
-|---|---|---|---|
-| Order | Insertion order (or LRU access order) | Sorted by key (natural/Comparator) | Enum declaration order |
-| Internal | HashMap + doubly linked list | Red-black tree | Simple array |
-| get/put | O(1) | O(log n) | O(1) |
-| Best for | LRU Cache, ordered iteration | Range queries, sorted output | Enum-keyed config/state |
-
-```java
-// LRU Cache with LinkedHashMap (production pattern)
-Map<String, Data> lru = new LinkedHashMap<>(128, 0.75f, true) {
-    protected boolean removeEldestEntry(Map.Entry<String, Data> e) {
-        return size() > 1000;
-    }
-};
-
-// Range queries with TreeMap
-TreeMap<Long, Event> timeline = new TreeMap<>();
-timeline.subMap(startTime, endTime).values(); // all events in range — O(log n + k)
-
-// EnumMap for state machines — zero boxing, array-backed
-EnumMap<OrderStatus, Handler> handlers = new EnumMap<>(OrderStatus.class);
-```
-
-#### Interview Answer
-> "LinkedHashMap maintains insertion order by wrapping HashMap entries in a doubly linked list — useful for LRU caches with the access-order constructor. TreeMap is a red-black tree — O(log n) but gives sorted iteration and range queries via subMap/headMap/tailMap. EnumMap is an array indexed by enum ordinal — O(1) and zero boxing overhead, ideal for enum-keyed state machines or config tables."
-
----
-
-## Q51. ArrayList vs LinkedList — Real performance trade-offs
-
-#### The Truth Most Candidates Get Wrong
-Interviewers expect you to say "LinkedList is O(1) insert at middle." The real answer is more nuanced.
-
-```
-ArrayList: Object[] array, resizes by 1.5x when full
-LinkedList: doubly-linked list, each node has prev/next pointers
-```
-
-| Operation | ArrayList | LinkedList |
-|---|---|---|
-| get(i) | O(1) — direct array index | O(n) — traverse from head |
-| add at end | O(1) amortized | O(1) |
-| add at middle | O(n) — shift elements | O(n) — must traverse to position first |
-| Memory | Compact — CPU cache friendly | Each node = object + 2 pointers = 3x memory |
-| Iteration | Very fast — cache line prefetch | Slow — pointer chasing, cache misses |
-
-#### The Cache Line Reality
-ArrayList elements are contiguous in memory. CPU prefetches the next elements automatically. LinkedList node traversal is pointer-chasing — every node access is a potential cache miss.
-
-**In practice: ArrayList almost always wins for collections under 100K elements.**
-
-#### When LinkedList Actually Wins
-- You have a `Deque` (addFirst/removeFirst at both ends) → use `ArrayDeque` instead (still beats LinkedList)
-- Iterator-based removals in the middle of very frequent structural modifications
-
-#### Interview Answer
-> "ArrayList is a resizable array — O(1) random access, O(n) mid-insertion due to shifting. LinkedList is O(n) to reach a position, so mid-insertion is also O(n) despite O(1) node pointer update. LinkedList has 3x memory overhead per element and destroys CPU cache locality — pointer chasing causes cache misses on every traversal. In production I almost always use ArrayList. For queue/deque semantics I use ArrayDeque, which beats LinkedList at both ends too."
-
----
-
-## Q52. How does PriorityQueue work internally — Heap data structure
-
-#### Internals
-PriorityQueue is a **min-heap** stored as an array. `poll()` returns the smallest element.
-
-```
-Heap array:  [1, 3, 2, 7, 4, 5, 6]
-As tree:
-        1
-       / \
-      3   2
-     / \ / \
-    7  4 5  6
-```
-
-- `offer(x)` → add at end, **sift up**: swap with parent until heap property restored — O(log n)
-- `poll()` → remove root, move last element to root, **sift down** — O(log n)
-- `peek()` → return `array[0]` — O(1)
-
-#### Production Use Cases
-```java
-// Top-K elements (e.g., top 10 trending products)
-PriorityQueue<Product> topK = new PriorityQueue<>(10, Comparator.comparingInt(Product::getScore));
-// Keep only top 10: if size > 10, poll() removes smallest
-
-// Task scheduling by priority
-PriorityQueue<Task> queue = new PriorityQueue<>(Comparator.comparingInt(Task::getPriority));
-```
-
-**Not thread-safe** → use `PriorityBlockingQueue` in concurrent code.
-
-#### Interview Answer
-> "PriorityQueue is a min-heap stored in an array. Offer adds at end and sifts up — O(log n). Poll removes the root (minimum), places last element at root, sifts down — O(log n). Peek is O(1). For thread-safe priority queues in producer-consumer patterns use PriorityBlockingQueue."
-
----
-
-## Q53. What is type erasure — How does it affect runtime behavior
-
-#### The Problem
-Generics in Java are a **compile-time feature only**. At runtime, generic type information is erased.
-
-```java
-List<String> strings = new ArrayList<>();
-List<Integer> ints = new ArrayList<>();
-
-System.out.println(strings.getClass() == ints.getClass()); // TRUE — both are just ArrayList
-```
-
-#### What Happens at Bytecode Level
-```java
-// You write:
-List<String> list = new ArrayList<>();
-list.add("hello");
-String s = list.get(0);
-
-// Compiler generates:
-List list = new ArrayList();       // raw type
-list.add("hello");
-String s = (String) list.get(0);  // compiler inserts cast
-```
-
-#### Why This Matters in Production
-
-**Cannot do at runtime:**
-```java
-if (obj instanceof List<String>) { } // COMPILE ERROR — can't check generic type at runtime
-new T();                             // COMPILE ERROR — T is erased
-T[] arr = new T[10];                 // COMPILE ERROR
-
-// Workaround: pass Class<T> explicitly
-public <T> T create(Class<T> clazz) { return clazz.newInstance(); }
-```
-
-**Heap pollution:**
-```java
-List[] raw = new List[1];
-List<String>[] typed = raw;          // unchecked cast — compiles with warning
-typed[0] = new ArrayList<Integer>(); // heap pollution — no runtime exception here
-String s = typed[0].get(0);          // ClassCastException at runtime
-```
-
-#### Interview Answer
-> "Java generics are implemented via type erasure — all generic type parameters are replaced with Object (or their upper bound) at bytecode level, and the compiler inserts casts. This means at runtime you cannot check generic types with instanceof, create instances of T, or create generic arrays. The benefit was backward compatibility with pre-Java 5 bytecode. The downside is heap pollution and unchecked cast warnings. In production this matters when using reflection with generic types — you need to pass Class<T> explicitly as a reification token."
 
 ---
 
@@ -3100,776 +2932,7 @@ Use `<? extends X>` when you only need to express the relationship and don't nee
 
 ---
 
-## Q56. How does Stream pipeline execute — Lazy evaluation internals
 
-#### The Problem
-Most developers think `stream()` processes elements immediately. It does not.
-
-#### Lazy Evaluation
-
-```java
-List<String> result = list.stream()
-    .filter(s -> s.startsWith("A"))   // NOT executed yet
-    .map(String::toUpperCase)          // NOT executed yet
-    .limit(3)                          // NOT executed yet
-    .collect(toList());                // THIS triggers execution
-```
-
-**Terminal operation triggers the pipeline.** Until then, nothing runs.
-
-#### How It Works Internally
-
-Stream wraps each operation in a `StatelessOp` or `StatefulOp` stage. At terminal execution, the JVM creates a **spliterator** and drives elements through all stages in **one pass**:
-
-```
-element "Alice"  → filter ✓ → map → "ALICE" → limit (count=1) → collected
-element "Bob"    → filter ✗ (skipped entirely — map never called)
-element "Anna"   → filter ✓ → map → "ANNA"  → limit (count=2) → collected
-element "Charlie"→ filter ✗
-element "Amy"    → filter ✓ → map → "AMY"   → limit (count=3) → STOP (limit reached)
-```
-
-**Short-circuit operations** (`limit`, `findFirst`, `anyMatch`) can stop the entire pipeline early — elements after the limit are never processed.
-
-#### Production Pitfall — Stream reuse
-```java
-Stream<String> stream = list.stream().filter(...);
-stream.collect(toList()); // OK
-stream.collect(toList()); // IllegalStateException: stream already operated upon
-```
-
-Streams are single-use. In production code, never store streams in fields or pass them between methods.
-
-#### Interview Answer
-> "Stream pipelines are lazy — intermediate operations (filter, map, flatMap) build a description of computation but execute nothing. The terminal operation (collect, forEach, reduce) triggers a single pass through the pipeline. Each element flows through all stages before the next element starts. Short-circuit terminals like limit and findFirst can stop processing early. This means a stream with filter+map+limit(3) processes at most a few elements, not the entire list. Streams are also single-use — calling a terminal operation twice throws IllegalStateException."
-
----
-
-## Q57. When does parallel stream hurt performance
-
-#### Common Misconception
-`parallelStream()` is not always faster. It frequently makes things worse.
-
-#### When parallel stream HURTS
-
-**1. Small collections** — Fork/Join overhead exceeds the work
-```java
-// For 100 elements — parallelStream is SLOWER
-list.stream().parallel().map(x -> x * 2).collect(toList());
-```
-
-**2. Shared mutable state** — race conditions, results are wrong
-```java
-List<Integer> result = new ArrayList<>();
-list.parallelStream().forEach(result::add); // DATA CORRUPTION — ArrayList is not thread-safe
-```
-
-**3. Ordered operations on ordered streams** — forces synchronization
-```java
-list.parallelStream().forEachOrdered(System.out::println); // serialized — no parallelism benefit
-```
-
-**4. I/O-bound work** — parallel stream uses ForkJoinPool.commonPool() shared across the JVM
-```java
-// This starves other parallel streams and ForkJoin tasks in the app
-list.parallelStream().map(id -> database.findById(id)).collect(toList()); // BAD
-```
-
-#### When parallel stream HELPS
-- CPU-bound operations (heavy computation per element)
-- Large collections (10,000+ elements)
-- Operations where work per element >> coordination cost
-- Stateless operations (no shared mutation)
-
-#### Production Rule
-Use `CompletableFuture` with a dedicated executor for I/O parallel work. Reserve parallel streams for CPU-bound data processing.
-
-#### Interview Answer
-> "Parallel streams use ForkJoinPool.commonPool() shared across the entire JVM. They hurt performance with small collections (coordination overhead exceeds gain), I/O-bound tasks (you block pool threads used by everyone), and shared mutable state (race conditions). They help only for stateless, CPU-bound, large-dataset operations. For I/O-parallel work in production I use CompletableFuture with a custom executor sized to I/O wait ratio. I've seen parallel streams cause cascading thread starvation in production when used for DB calls."
-
----
-
-## Q58. What is a functional interface — Lambda capture internals
-
-#### Functional Interface
-Any interface with exactly **one abstract method**. `@FunctionalInterface` enforces this at compile time.
-
-```java
-@FunctionalInterface
-interface Transformer<T, R> {
-    R transform(T input);
-    // can have default methods — still functional
-    default Transformer<T, R> andThen(Transformer<R, ?> after) { ... }
-}
-```
-
-JDK built-ins: `Function<T,R>`, `Predicate<T>`, `Consumer<T>`, `Supplier<T>`, `BiFunction<T,U,R>`
-
-#### Lambda Capture — What Gets Captured
-```java
-String prefix = "Hello";         // effectively final — captured by VALUE
-int count = 0;
-// count++ inside lambda → COMPILE ERROR — not effectively final
-
-Function<String, String> greeter = name -> prefix + ", " + name;
-// prefix is captured — copied into the lambda instance
-```
-
-**Lambdas capture effectively-final local variables by value.** Instance fields are accessed via `this` reference (which is captured).
-
-#### Method References — Four Types
-```java
-String::toUpperCase      // instance method on parameter — equivalent to s -> s.toUpperCase()
-System.out::println      // instance method on specific object — bound method ref
-String::new              // constructor reference
-Integer::parseInt        // static method reference
-```
-
-#### Interview Answer
-> "A functional interface has exactly one abstract method — this is what allows lambda assignment. Lambdas are compiled to invokedynamic bytecode, which at runtime creates an instance implementing the interface. Local variables captured by lambdas must be effectively final — the value is copied into the lambda instance at creation time. This is why you can't mutate a captured local variable inside a lambda. Method references are syntactic sugar for lambdas, with four forms: static method, bound instance method, unbound instance method, and constructor reference."
-
----
-
-## Q59. What is Optional — Correct usage and anti-patterns
-
-#### Correct Use Cases
-Optional is for **return types** where absence is a valid and expected outcome.
-
-```java
-// CORRECT — repository returning absent result
-Optional<User> findByEmail(String email);
-
-// Usage — forces caller to handle absence explicitly
-Optional<User> user = repo.findByEmail(email);
-user.map(User::getName)
-    .orElse("Anonymous");
-```
-
-#### Anti-Patterns to Know
-
-```java
-// WRONG 1 — Optional as method parameter (use overloading instead)
-void process(Optional<String> name) { }   // caller can pass Optional.empty() OR null — confusing
-
-// WRONG 2 — Optional.get() without isPresent() — defeats the purpose
-String name = user.get(); // throws NoSuchElementException — same as NPE
-
-// WRONG 3 — Optional in fields or collections
-class User { Optional<String> nickname; }    // serialization issues, extra allocation
-List<Optional<User>> users;                  // use filter() to remove nulls instead
-
-// WRONG 4 — wrapping non-nullable returns
-Optional<String> getName() { return Optional.of("Alice"); } // just return String
-```
-
-#### Correct Pattern — orElseGet vs orElse
-```java
-// orElse — ALWAYS evaluates the argument (even if Optional has value)
-user.orElse(createExpensiveDefault()); // createExpensiveDefault() always called
-
-// orElseGet — evaluates ONLY if Optional is empty (lazy)
-user.orElseGet(() -> createExpensiveDefault()); // called only when needed
-```
-
-#### Interview Answer
-> "Optional is designed for return types where absence is a domain concept, not an error — like repository lookups. It forces callers to handle absence explicitly instead of ignoring a null return. Anti-patterns: using Optional as a method parameter (use overloading), storing Optional in fields (serialization breaks), calling get() without checking (same risk as NPE), and returning Optional from methods where the value is never absent. orElseGet is always preferred over orElse when the default is expensive — orElse always evaluates the argument even when not needed."
-
----
-
-## Q60. Checked vs Unchecked exceptions — Design philosophy and production patterns
-
-#### The Distinction
-```java
-// Checked — caller MUST handle or declare
-void readFile(String path) throws IOException { }          // compiler enforces
-
-// Unchecked (RuntimeException) — optional to handle
-void process(String input) { throw new IllegalArgumentException("null input"); }
-```
-
-#### The Design Philosophy Debate
-
-**Checked exceptions:** James Gosling's intent — force callers to acknowledge failure modes at compile time. Good for recoverable failures (`IOException`, `SQLException`).
-
-**Modern consensus (Clean Code, Spring, Effective Java 3rd ed):** Use unchecked for most production code.
-
-```java
-// Spring wraps all JDBC checked exceptions into DataAccessException (unchecked)
-// Reason: most SQL failures are unrecoverable at the call site — forcing try/catch everywhere adds noise
-```
-
-#### Production Pattern — Custom Exception Hierarchy
-
-```java
-// Base unchecked domain exception
-public class DomainException extends RuntimeException {
-    private final ErrorCode code;
-    public DomainException(ErrorCode code, String message, Throwable cause) {
-        super(message, cause);
-        this.code = code;
-    }
-}
-
-// Specific subtypes
-public class UserNotFoundException extends DomainException {
-    public UserNotFoundException(String userId) {
-        super(ErrorCode.USER_NOT_FOUND, "User not found: " + userId, null);
-    }
-}
-```
-
-#### Interview Answer
-> "Checked exceptions enforce handling at compile time — appropriate for recoverable failures the caller can meaningfully act on, like file not found. Unchecked exceptions signal programming errors or unrecoverable failures. Modern Java production code (Spring, Hibernate, JPA) uses unchecked almost exclusively — checked exceptions in deep call chains cause API pollution and catch-rethrow boilerplate. I use a custom DomainException hierarchy extending RuntimeException, with error codes for API responses, and preserve root cause via exception chaining."
-
----
-
-## Q61. What is exception chaining — How to preserve root cause
-
-#### The Problem
-You catch a low-level exception (SQL, IO) and throw a domain exception. Without chaining, the original stack trace is lost forever.
-
-```java
-// BAD — root cause lost
-try {
-    repo.save(user);
-} catch (SQLException e) {
-    throw new UserSaveException("Failed to save user"); // e is swallowed
-}
-
-// CORRECT — chain the cause
-throw new UserSaveException("Failed to save user", e); // e preserved as cause
-```
-
-```java
-// Caller sees full chain:
-UserSaveException: Failed to save user
-    at UserService.save(UserService.java:45)
-Caused by: java.sql.SQLException: Connection refused
-    at com.mysql.jdbc...
-```
-
-#### Interview Answer
-> "Exception chaining preserves the original cause when wrapping low-level exceptions into domain exceptions. Always pass the original exception as the cause parameter to the new exception constructor. Without this, the root cause is lost and production debugging becomes guesswork — you see a DomainException with no indication of whether it was a SQL timeout, a network error, or a constraint violation."
-
----
-
-## Q62. try-with-resources internals — What happens when both body and close() throw
-
-#### The Mechanism
-`try-with-resources` calls `close()` on `AutoCloseable` resources automatically, even if an exception is thrown.
-
-```java
-try (Connection conn = dataSource.getConnection();
-     PreparedStatement ps = conn.prepareStatement(sql)) {
-    ps.executeUpdate();
-} // conn.close() and ps.close() called automatically, in reverse order
-```
-
-#### Suppressed Exceptions — The Hidden Behavior
-If the try body throws AND `close()` also throws, the `close()` exception is **suppressed** (attached to the primary exception), not lost.
-
-```java
-// Both throw:
-// body:    throw new IOException("query failed")
-// close(): throw new IOException("connection close failed")
-
-// Result: caller gets IOException("query failed")
-//         with getSuppressed()[0] = IOException("connection close failed")
-
-catch (IOException e) {
-    e.getSuppressed(); // retrieve the close() exception
-}
-```
-
-#### Interview Answer
-> "try-with-resources calls close() on all declared resources in reverse declaration order, guaranteed even on exception. If both the body and close() throw, the close() exception is attached as a suppressed exception on the primary one — retrievable via getSuppressed(). This is critical in production: before try-with-resources, developers often wrote finally blocks that accidentally swallowed the original exception when close() threw."
-
----
-
-## Q63. Builder pattern deep dive — Why Lombok @Builder differs from Gang of Four
-
-#### Gang of Four Builder
-Separates complex object construction from representation. Has a `Director` that drives the build sequence.
-
-```java
-// GoF: Director controls build order
-builder.setFoundation().setWalls().setRoof();
-House house = builder.build();
-```
-
-#### Effective Java / Modern Java Builder
-Used for objects with many optional parameters. Prevents telescoping constructors.
-
-```java
-User user = User.builder()
-    .name("Ranveer")
-    .email("r@example.com")
-    .role(Role.ADMIN)
-    .build();
-```
-
-#### Lombok @Builder Pitfalls in Production
-
-```java
-@Builder
-public class PaymentRequest {
-    private String orderId;
-    private BigDecimal amount;
-    // Lombok generates builder — but NO validation in build()
-}
-
-// Problem: invalid state is possible
-PaymentRequest req = PaymentRequest.builder().build(); // orderId=null, amount=null — no error
-```
-
-**Fix:** Add `@Builder` with custom `build()` for validation:
-```java
-public static class PaymentRequestBuilder {
-    public PaymentRequest build() {
-        Objects.requireNonNull(orderId, "orderId required");
-        if (amount.compareTo(BigDecimal.ZERO) <= 0) throw new IllegalArgumentException("amount must be positive");
-        return new PaymentRequest(orderId, amount);
-    }
-}
-```
-
-#### Also: @Builder breaks with inheritance
-`@Builder` on a subclass doesn't include parent class fields. Use `@SuperBuilder` instead.
-
-#### Interview Answer
-> "GoF Builder separates construction algorithm from representation using a Director. The Effective Java pattern — now ubiquitous — solves telescoping constructors for objects with many optional fields. Lombok @Builder generates this automatically but has two production pitfalls: no validation in build() by default (you must override the generated builder's build() method), and it breaks with inheritance — use @SuperBuilder instead. In domain objects I always add validation in a custom build() to ensure invariants are maintained at construction time."
-
----
-
-## Q64. Strategy vs Template Method — When to use which
-
-#### Template Method
-Define the skeleton of an algorithm in a base class. Subclasses fill in specific steps. **Inheritance-based.**
-
-```java
-abstract class ReportGenerator {
-    final void generate() {           // template method — sealed
-        fetchData();
-        formatData();                 // subclass overrides this
-        export();
-    }
-    abstract void formatData();
-}
-
-class PdfReport extends ReportGenerator {
-    void formatData() { /* PDF formatting */ }
-}
-```
-
-#### Strategy
-Define a family of algorithms, encapsulate each. **Composition-based.**
-
-```java
-interface PricingStrategy { BigDecimal calculate(Order order); }
-
-class RegularPricing implements PricingStrategy { ... }
-class PremiumPricing  implements PricingStrategy { ... }
-class FlashSalePricing implements PricingStrategy { ... }
-
-// Injected at runtime
-class OrderService {
-    private final PricingStrategy pricing;
-    // pricing can be swapped without changing OrderService
-}
-```
-
-#### When to Choose
-
-| | Template Method | Strategy |
-|---|---|---|
-| Coupling | Tight (inheritance) | Loose (composition) |
-| Runtime swap? | No | Yes |
-| Adding new variation | New subclass | New Strategy class |
-| Testing | Hard (test through subclass) | Easy (mock the interface) |
-
-**Prefer Strategy.** Template Method violates "favor composition over inheritance" and is harder to test. In microservices, Strategy maps naturally to dependency injection.
-
-#### Interview Answer
-> "Template Method uses inheritance — base class defines the algorithm skeleton, subclasses override specific steps. It's rigid: you can't swap the algorithm at runtime and subclassing creates tight coupling. Strategy uses composition — the algorithm is extracted into a separate interface, and the context holds a reference injected at construction or runtime. I strongly prefer Strategy in production code: it's trivially testable by mocking the interface, new algorithms are added without modifying existing classes (Open/Closed), and Spring DI makes injection natural."
-
----
-
-## Q65. Event-driven architecture in pure Java — without a framework
-
-#### Core Components
-
-```java
-// 1. Event
-public record OrderPlaced(String orderId, BigDecimal amount, Instant timestamp) {}
-
-// 2. Listener interface
-@FunctionalInterface
-public interface EventListener<E> {
-    void onEvent(E event);
-}
-
-// 3. Thread-safe EventBus
-public class EventBus {
-    private final Map<Class<?>, List<EventListener<Object>>> listeners = new ConcurrentHashMap<>();
-    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-
-    @SuppressWarnings("unchecked")
-    public <E> void subscribe(Class<E> eventType, EventListener<E> listener) {
-        listeners.computeIfAbsent(eventType, k -> new CopyOnWriteArrayList<>())
-                 .add((EventListener<Object>) listener);
-    }
-
-    public <E> void publish(E event) {
-        List<EventListener<Object>> handlers = listeners.get(event.getClass());
-        if (handlers == null) return;
-        for (EventListener<Object> handler : handlers) {
-            executor.submit(() -> {
-                try { handler.onEvent(event); }
-                catch (Exception e) { log.error("Listener failed", e); }
-            });
-        }
-    }
-}
-
-// 4. Usage
-eventBus.subscribe(OrderPlaced.class, event -> inventoryService.reserve(event.orderId()));
-eventBus.subscribe(OrderPlaced.class, event -> emailService.sendConfirmation(event));
-eventBus.publish(new OrderPlaced(orderId, amount, Instant.now()));
-```
-
-**Key decisions explained:**
-- `ConcurrentHashMap` + `CopyOnWriteArrayList` — safe concurrent subscribe/publish
-- `VirtualThreadPerTaskExecutor` — each listener on its own virtual thread, I/O doesn't block others
-- Exception isolation — one listener failure doesn't kill others
-
----
-
-## Q66. How does String interning work — String Pool
-
-#### String Pool
-String literals are stored in the **String Pool** (part of Metaspace in Java 8+, was PermGen before).
-
-```java
-String a = "hello";       // stored in pool
-String b = "hello";       // SAME reference — returns existing pool entry
-String c = new String("hello"); // forced NEW object on heap — NOT from pool
-
-System.out.println(a == b); // true  — same pool reference
-System.out.println(a == c); // false — different objects
-System.out.println(a.equals(c)); // true — same content
-
-// Force c into pool:
-String d = c.intern(); // returns pool reference
-System.out.println(a == d); // true
-```
-
-#### Why This Matters in Production
-```java
-// Dangerous pattern — comparing strings with ==
-if (user.getRole() == "ADMIN") { } // ALWAYS FALSE for runtime strings
-
-// Safe — always use equals() for String comparison
-if ("ADMIN".equals(user.getRole())) { }
-```
-
-#### Excessive interning is a memory leak
-```java
-// BAD — interning millions of unique user IDs bloats Metaspace permanently
-String userId = UUID.randomUUID().toString().intern(); // stays in pool forever
-```
-
----
-
-## Q67. Why is String immutable
-
-#### Reasons (all interviewers expect all four)
-
-**1. String Pool safety** — Multiple references point to the same pool object. If strings were mutable, one reference changing the value would corrupt all others.
-
-**2. Thread safety** — Immutable objects are inherently thread-safe. No synchronization needed when sharing strings across threads.
-
-**3. Security** — Class loading uses string class names. File paths, network addresses passed as strings. If mutable, an attacker could change the value after security checks.
-
-**4. HashMap key safety** — hashCode is cached in String after first computation. If content changed, the cached hash would be wrong and HashMap entries permanently lost.
-
-```java
-// String caches hashCode after first call
-private int hash; // default 0
-public int hashCode() {
-    if (hash == 0 && value.length > 0) {
-        hash = computeHash(); // computed once, cached forever
-    }
-    return hash;
-}
-```
-
----
-
-## Q68. StringBuilder vs StringBuffer vs String concatenation
-
-```java
-// String concatenation in a loop — BAD
-String result = "";
-for (String s : list) {
-    result += s; // creates a new String object every iteration — O(n²) total
-}
-
-// StringBuilder — CORRECT for single-threaded (not synchronized)
-StringBuilder sb = new StringBuilder();
-for (String s : list) {
-    sb.append(s); // amortized O(1) — internal char[] resizes like ArrayList
-}
-String result = sb.toString();
-
-// StringBuffer — synchronized — use only when multiple threads write to same buffer
-// (rare in practice — design usually avoids shared mutable string builders)
-```
-
-#### Compiler Optimization
-```java
-String s = "Hello " + name + "!"; // compiler converts to StringBuilder automatically
-// Only applies to single-expression concatenation, NOT loops
-```
-
----
-
-## Q69. Java Serialization — serialVersionUID, transient, Externalizable
-
-```java
-public class User implements Serializable {
-    private static final long serialVersionUID = 1L; // version control for deserialization
-    private String name;
-    private transient String password; // NOT serialized
-    private transient Logger log;      // NOT serialized — can't serialize Logger
-}
-```
-
-#### serialVersionUID
-If you add/remove fields without updating `serialVersionUID`, deserialization of old data throws `InvalidClassException`. Always declare it explicitly.
-
-#### Externalizable — Full Control
-```java
-public class User implements Externalizable {
-    public void writeExternal(ObjectOutput out) throws IOException {
-        out.writeUTF(name); // you control exactly what's written
-    }
-    public void readExternal(ObjectInput in) throws IOException {
-        this.name = in.readUTF();
-    }
-}
-```
-
-Faster than default serialization but requires a public no-arg constructor.
-
----
-
-## Q70. Why Java default serialization is dangerous in production
-
-#### Three Problems
-
-**1. Security — Deserialization Gadget Chains**
-Java deserializes to any class on the classpath. Attackers craft malicious byte streams that trigger code execution during deserialization (Apache Commons Collections CVE, Log4Shell-adjacent attacks).
-
-```java
-// NEVER deserialize untrusted data with ObjectInputStream without validation
-ObjectInputStream ois = new ObjectInputStream(untrustedInput); // RCE risk
-```
-
-**2. Versioning — Brittle Schema**
-Adding a field in a new deployment breaks deserialization of data written by the old version unless `serialVersionUID` is managed carefully.
-
-**3. Performance**
-Java serialization is slow and produces large byte payloads compared to JSON (Jackson), Protobuf, or Avro.
-
-#### Production Alternatives
-```
-Protobuf  — schema-first, compact binary, cross-language, versioning built-in
-Jackson   — JSON, human readable, widely supported
-Avro      — Kafka ecosystem, schema registry, compact
-Kryo      — faster Java serialization for Spark/Flink use cases
-```
-
-#### Interview Answer
-> "Java default serialization has three production problems: security — deserialization of untrusted data enables remote code execution via gadget chains (multiple critical CVEs in Spring, Apache Commons); versioning — any class change breaks deserialization of old data without careful serialVersionUID management; and performance — it's verbose and slow compared to Protobuf or JSON. In production I use Jackson for REST APIs, Protobuf or Avro for event streaming, and never expose ObjectInputStream to external input."
-
----
-
-## Production Incident Walkthroughs
-
----
-
-## Q71. Production scenario: Service latency jumped from 20ms p99 to 4s — Diagnose it
-
-> This is asked verbatim at Amazon, Flipkart, and PhonePe for Senior/Principal roles.
-
-#### Systematic Diagnosis
-
-**Step 1 — Correlate with deployment or traffic spike**
-```bash
-# Check if latency spike aligns with a deploy
-kubectl rollout history deployment/order-service
-# Check traffic volume
-# Check dependency health (DB, Redis, downstream services)
-```
-
-**Step 2 — Check thread pool saturation**
-```bash
-# Get thread dump
-jcmd <pid> Thread.print
-# Or via jstack
-jstack <pid> | grep -A 3 "WAITING\|BLOCKED" | head -100
-```
-Large numbers of threads in `WAITING` state on `queue.take()` = thread pool exhausted, tasks queuing.
-
-**Step 3 — Check GC**
-```bash
-jstat -gc <pid> 1000   # check GC frequency and pause times
-# Or from logs: look for long GC pauses
-grep "GC pause" app.log | awk '{print $NF}' | sort -n | tail -20
-```
-Full GC pauses of 2–4s = heap pressure, likely a memory leak or undersized heap.
-
-**Step 4 — Check DB connection pool**
-```
-# HikariCP metrics (if exposed via Micrometer/Prometheus)
-hikaricp_connections_pending  # threads waiting for connection
-hikaricp_connections_timeout_total  # connections that timed out
-```
-High `pending` count = DB connection pool exhausted → all threads stall waiting for a connection.
-
-**Step 5 — Check downstream service latency**
-```
-# Distributed trace (Zipkin/Jaeger)
-# Find traces with 4s duration — which span is slow?
-```
-
-#### Common Root Causes for This Pattern
-1. **DB slow query** — missing index after data grew past threshold
-2. **Thread pool too small** — traffic spike exhausted threads
-3. **Memory leak** → Full GC → 3s Stop-the-World(STW) pause
-4. **Downstream timeout misconfigured** — calls waiting the full timeout instead of failing fast
-
-#### Interview Answer
-> "I'd correlate the timestamp with recent deployments and traffic changes first. Then check thread dumps for blocked/waiting threads indicating pool exhaustion. Run jstat to check for GC pressure — a sudden Full GC of several seconds explains the exact latency pattern. Check DB connection pool pending counts. Use distributed traces to find which span holds the 4 seconds. In one incident at [company], this pattern was caused by a missing DB index — as data grew past 10M rows a query plan changed from index scan to full table scan, causing 3s query time that exhausted the connection pool."
-
----
-
-## Q72. Production scenario: OutOfMemoryError every 3 days — Diagnose and fix
-
-#### The Pattern
-OOM every N days = **slow memory leak**. Something is accumulating across requests but not being collected.
-
-#### Step 1 — Capture Heap Dump on OOM (must configure before it happens)
-```bash
-# Add to JVM flags:
--XX:+HeapDumpOnOutOfMemoryError
--XX:HeapDumpPath=/var/log/heapdump.hprof
-```
-
-#### Step 2 — Analyze with Eclipse MAT or VisualVM
-```
-Open heapdump.hprof in Eclipse MAT
-→ "Leak Suspects" report
-→ Look for the largest retained heap object graph
-```
-
-Common findings:
-- A `static Map` (cache) that grows unboundedly
-- `ThreadLocal` values not removed in thread pool threads
-- Listeners registered but never deregistered (observer pattern leak)
-- `ClassLoader` leak in hot-deploy scenarios (Metaspace OOM variant)
-
-#### Step 3 — Typical Root Causes and Fixes
-
-**Unbounded static cache:**
-```java
-// BAD
-static Map<String, UserProfile> cache = new HashMap<>(); // grows forever
-
-// FIX: use bounded LRU cache
-static Map<String, UserProfile> cache = Collections.synchronizedMap(
-    new LinkedHashMap<>(1000, 0.75f, true) {
-        protected boolean removeEldestEntry(Map.Entry e) { return size() > 1000; }
-    });
-// Or: use Caffeine/Guava Cache with size limit + TTL
-```
-
-**ThreadLocal leak:**
-```java
-// BAD: set in filter, never removed
-threadLocal.set(requestContext);
-// thread returns to pool with stale context
-
-// FIX: always remove in finally
-try {
-    threadLocal.set(requestContext);
-    chain.doFilter(request, response);
-} finally {
-    threadLocal.remove(); // MANDATORY
-}
-```
-
-#### Interview Answer
-> "OOM every 3 days is a slow memory leak — something accumulates across requests. First I'd ensure HeapDumpOnOutOfMemoryError is configured so the next OOM captures the heap state. Then analyze in Eclipse MAT — the Leak Suspects report shows the largest retained object graphs. Most common causes I've seen: unbounded static caches that grow without eviction, ThreadLocal values not removed in thread pool request handlers, and event listeners registered on startup but never deregistered. The fix depends on the root cause — add size bounds and TTL to caches, add threadLocal.remove() in finally blocks, and use WeakReference for listeners."
-
----
-
-## Q73. Production scenario: Thread pool exhaustion bringing service down
-
-#### The Symptoms
-- HTTP timeouts from clients
-- Service responds to health check but not to real requests
-- Thread dump shows all threads BLOCKED or in queue.take()
-
-#### Why It Happens
-
-```
-Incoming requests → submit to thread pool → queue fills up → RejectedExecutionException
-                                                           OR
-                                         → threads all BLOCKED on slow DB call
-```
-
-#### Diagnosis
-```bash
-# Thread dump
-jstack <pid> | grep "pool-" | wc -l     # count pool threads
-jstack <pid> | grep "BLOCKED" | wc -l   # count blocked threads
-
-# If all pool threads are BLOCKED on the same call:
-jstack <pid> | grep -A 20 "BLOCKED" | grep "at " | sort | uniq -c | sort -rn
-# The most common stack frame = the bottleneck
-```
-
-#### Fixes
-
-**Fix 1 — Size the pool correctly for I/O-bound work**
-```java
-// For service making DB calls (I/O-bound):
-// pool size = cores × (1 + wait_time/compute_time)
-// If 90% of time is waiting: cores × 10
-int poolSize = Runtime.getRuntime().availableProcessors() * 10;
-```
-
-**Fix 2 — Add timeouts to all downstream calls**
-```java
-// Blocking thread for unlimited time = pool exhaustion
-restTemplate.setRequestFactory(factory); // set read timeout = 2s, connect timeout = 500ms
-```
-
-**Fix 3 — Use separate pools for different resource types**
-```java
-ExecutorService dbPool   = Executors.newFixedThreadPool(20);  // for DB calls
-ExecutorService httpPool = Executors.newFixedThreadPool(50);  // for HTTP calls
-// If DB is slow, it doesn't exhaust the HTTP pool
-```
-
-**Fix 4 — Virtual threads (Java 21)** — eliminates pool exhaustion for I/O-bound work entirely
-```java
-ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-// Blocked virtual threads unmount from carrier — carrier thread stays free
-```
-
----
 
 ## Q74. Production scenario: Kafka consumer lag growing indefinitely
 
@@ -3912,140 +2975,7 @@ try {
 
 ---
 
-## Q75. How does Spring @Transactional actually work — Proxy, AOP, pitfalls
 
-#### The Mechanism
-Spring creates a **dynamic proxy** around your bean. The proxy intercepts method calls, starts a transaction before your method, and commits/rolls back after.
-
-```
-Caller → [Spring Proxy (opens transaction)] → Your @Transactional method → [Proxy commits/rolls back]
-```
-
-#### Three Critical Pitfalls
-
-**Pitfall 1 — Self-invocation (most common interview question)**
-```java
-@Service
-public class OrderService {
-    public void placeOrder(Order order) {
-        // Calls internal method — goes DIRECTLY, bypasses proxy — NO transaction!
-        this.saveOrder(order);
-    }
-
-    @Transactional
-    public void saveOrder(Order order) { ... } // transaction NEVER starts
-}
-```
-Fix: inject self, or restructure into two Spring beans.
-
-**Pitfall 2 — private methods**
-```java
-@Transactional
-private void saveOrder(Order order) { } // Spring proxy can't intercept private — silently ignored
-```
-`@Transactional` only works on `public` methods (with Spring default proxy).
-
-**Pitfall 3 — Checked exception rollback**
-```java
-@Transactional
-public void process() throws IOException {
-    // IOException is checked — Spring does NOT rollback by default
-    // Only RuntimeException triggers rollback
-}
-// Fix:
-@Transactional(rollbackFor = IOException.class)
-```
-
-#### Interview Answer
-> "@Transactional works via Spring AOP — a proxy wraps your bean and intercepts public method calls. The proxy opens a transaction before the method, binds a connection to the thread, and commits or rolls back after. Three critical production pitfalls: self-invocation bypasses the proxy so @Transactional on a method called by another method in the same class has no effect; private methods are not intercepted; and checked exceptions don't trigger rollback by default — only RuntimeException does, unless you set rollbackFor explicitly."
-
----
-
-## Q76. Spring ApplicationContext lifecycle — Bean wiring and destruction
-
-#### Bean Lifecycle Phases
-```
-1. BeanDefinition scanning (component scan / @Bean methods)
-2. BeanFactory post-processing (PropertySourcesPlaceholderConfigurer, etc.)
-3. Bean instantiation (constructor)
-4. Dependency injection (@Autowired fields/setters)
-5. @PostConstruct / InitializingBean.afterPropertiesSet()
-6. Bean in service (handles requests)
-7. @PreDestroy / DisposableBean.destroy() (on context close)
-```
-
-#### Production Patterns
-
-```java
-@Component
-public class KafkaConsumerService {
-    @PostConstruct
-    public void start() {
-        // Start background thread here — not in constructor
-        // All dependencies are injected by this point
-        executor.submit(this::pollLoop);
-    }
-
-    @PreDestroy
-    public void stop() {
-        // Graceful shutdown — signal thread to stop, wait for in-flight messages
-        running.set(false);
-        executor.awaitTermination(30, TimeUnit.SECONDS);
-    }
-}
-```
-
-**Constructor vs @PostConstruct:**
-- Constructor: dependencies not yet injected — don't start background work here
-- @PostConstruct: all dependencies ready — safe to start
-
----
-
-## Q77. How do you design idempotent APIs in Java
-
-#### The Problem
-Network retries can cause the same request to be processed twice — double charges, duplicate orders.
-
-#### Pattern 1 — Idempotency Key (industry standard)
-```java
-// Client sends unique idempotency key per request
-POST /payments
-Idempotency-Key: client-generated-uuid-123
-
-// Server:
-@PostMapping("/payments")
-public ResponseEntity<PaymentResult> pay(@RequestHeader("Idempotency-Key") String key,
-                                          @RequestBody PaymentRequest req) {
-    // Check if we've seen this key before
-    Optional<PaymentResult> existing = idempotencyStore.get(key);
-    if (existing.isPresent()) return ResponseEntity.ok(existing.get()); // return cached result
-
-    PaymentResult result = paymentService.process(req);
-    idempotencyStore.save(key, result, Duration.ofDays(1)); // store result with TTL
-    return ResponseEntity.ok(result);
-}
-```
-
-#### Pattern 2 — Database Unique Constraint
-```sql
-CREATE TABLE payments (
-    id BIGSERIAL PRIMARY KEY,
-    idempotency_key VARCHAR(64) UNIQUE,  -- database enforces uniqueness
-    amount DECIMAL,
-    status VARCHAR(20)
-);
--- Duplicate insert raises constraint violation → catch and return existing row
-```
-
-#### Pattern 3 — Conditional Update (Optimistic Locking)
-```java
-// Only update if current state matches expected state
-@Query("UPDATE orders SET status='CONFIRMED' WHERE id=:id AND status='PENDING'")
-int confirmOrder(@Param("id") Long id);
-// Returns 0 if already confirmed — no double-processing
-```
-
----
 
 ## Q78. Distributed locking in Java — Redis, ZooKeeper, database patterns
 
@@ -4182,6 +3112,154 @@ OrderService compensates: mark order CANCELLED
 #### Interview Answer
 > "2PC across microservices is impractical — it requires distributed locks, has coordinator SPOF, and doesn't work well with message brokers. The standard production pattern is the Outbox: write the domain event to an outbox table in the same database transaction as the business data change. A separate process (CDC with Debezium, or a poller) reads the outbox and publishes to Kafka. This gives you atomicity within a single DB transaction and eventual delivery to Kafka. For multi-service workflows I use the Saga pattern — either choreography via domain events or orchestration with a tool like Temporal — with compensating transactions for rollback."
 
+
+
+
+## Q73. Production scenario: Thread pool exhaustion bringing service down
+
+#### The Symptoms
+- HTTP timeouts from clients
+- Service responds to health check but not to real requests
+- Thread dump shows all threads BLOCKED or in queue.take()
+
+#### Why It Happens
+
+```
+Incoming requests → submit to thread pool → queue fills up → RejectedExecutionException
+                                                           OR
+                                         → threads all BLOCKED on slow DB call
+```
+
+#### Diagnosis
+```bash
+# Thread dump
+jstack <pid> | grep "pool-" | wc -l     # count pool threads
+jstack <pid> | grep "BLOCKED" | wc -l   # count blocked threads
+
+# If all pool threads are BLOCKED on the same call:
+jstack <pid> | grep -A 20 "BLOCKED" | grep "at " | sort | uniq -c | sort -rn
+# The most common stack frame = the bottleneck
+```
+
+#### Fixes
+
+**Fix 1 — Size the pool correctly for I/O-bound work**
+```java
+// For service making DB calls (I/O-bound):
+// pool size = cores × (1 + wait_time/compute_time)
+// If 90% of time is waiting: cores × 10
+int poolSize = Runtime.getRuntime().availableProcessors() * 10;
+```
+
+**Fix 2 — Add timeouts to all downstream calls**
+```java
+// Blocking thread for unlimited time = pool exhaustion
+restTemplate.setRequestFactory(factory); // set read timeout = 2s, connect timeout = 500ms
+```
+
+**Fix 3 — Use separate pools for different resource types**
+```java
+ExecutorService dbPool   = Executors.newFixedThreadPool(20);  // for DB calls
+ExecutorService httpPool = Executors.newFixedThreadPool(50);  // for HTTP calls
+// If DB is slow, it doesn't exhaust the HTTP pool
+```
+
+**Fix 4 — Virtual threads (Java 21)** — eliminates pool exhaustion for I/O-bound work entirely
+```java
+ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+// Blocked virtual threads unmount from carrier — carrier thread stays free
+```
+
+---
+
+---
+
+## Q76. Spring ApplicationContext lifecycle — Bean wiring and destruction
+
+#### Bean Lifecycle Phases
+```
+1. BeanDefinition scanning (component scan / @Bean methods)
+2. BeanFactory post-processing (PropertySourcesPlaceholderConfigurer, etc.)
+3. Bean instantiation (constructor)
+4. Dependency injection (@Autowired fields/setters)
+5. @PostConstruct / InitializingBean.afterPropertiesSet()
+6. Bean in service (handles requests)
+7. @PreDestroy / DisposableBean.destroy() (on context close)
+```
+
+#### Production Patterns
+
+```java
+@Component
+public class KafkaConsumerService {
+    @PostConstruct
+    public void start() {
+        // Start background thread here — not in constructor
+        // All dependencies are injected by this point
+        executor.submit(this::pollLoop);
+    }
+
+    @PreDestroy
+    public void stop() {
+        // Graceful shutdown — signal thread to stop, wait for in-flight messages
+        running.set(false);
+        executor.awaitTermination(30, TimeUnit.SECONDS);
+    }
+}
+```
+
+**Constructor vs @PostConstruct:**
+- Constructor: dependencies not yet injected — don't start background work here
+- @PostConstruct: all dependencies ready — safe to start
+
+---
+
+## Q77. How do you design idempotent APIs in Java
+
+#### The Problem
+Network retries can cause the same request to be processed twice — double charges, duplicate orders.
+
+#### Pattern 1 — Idempotency Key (industry standard)
+```java
+// Client sends unique idempotency key per request
+POST /payments
+Idempotency-Key: client-generated-uuid-123
+
+// Server:
+@PostMapping("/payments")
+public ResponseEntity<PaymentResult> pay(@RequestHeader("Idempotency-Key") String key,
+                                          @RequestBody PaymentRequest req) {
+    // Check if we've seen this key before
+    Optional<PaymentResult> existing = idempotencyStore.get(key);
+    if (existing.isPresent()) return ResponseEntity.ok(existing.get()); // return cached result
+
+    PaymentResult result = paymentService.process(req);
+    idempotencyStore.save(key, result, Duration.ofDays(1)); // store result with TTL
+    return ResponseEntity.ok(result);
+}
+```
+
+#### Pattern 2 — Database Unique Constraint
+```sql
+CREATE TABLE payments (
+    id BIGSERIAL PRIMARY KEY,
+    idempotency_key VARCHAR(64) UNIQUE,  -- database enforces uniqueness
+    amount DECIMAL,
+    status VARCHAR(20)
+);
+-- Duplicate insert raises constraint violation → catch and return existing row
+```
+
+#### Pattern 3 — Conditional Update (Optimistic Locking)
+```java
+// Only update if current state matches expected state
+@Query("UPDATE orders SET status='CONFIRMED' WHERE id=:id AND status='PENDING'")
+int confirmOrder(@Param("id") Long id);
+// Returns 0 if already confirmed — no double-processing
+```
+
+---
+
 ---
 
 ## Quick Reference — Complete Cheat Sheet (Updated)
@@ -4209,3 +3287,5 @@ OrderService compensates: mark order CANCELLED
 | PECS | extends = read only (covariant), super = write only (contravariant) |
 | Builder validation | Override Lombok builder's build() method to enforce invariants |
 | Strategy > Template Method | Composition over inheritance; easier to test and extend |
+
+
